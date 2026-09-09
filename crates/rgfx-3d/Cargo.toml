@@ -10,4 +10,5 @@ description = "3D math, camera controls, and automatic model framing for rgfx"
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }
 glam.workspace = true
+gltf.workspace = true
 tobj.workspace = true
