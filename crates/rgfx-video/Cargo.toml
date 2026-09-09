@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Video frame decoding into the rgfx framebuffer pipeline by shelling out to ffmpeg/ffprobe"
+keywords = ["terminal", "video", "ffmpeg", "ascii", "playback"]
+categories = ["multimedia::video", "command-line-utilities"]
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }
