@@ -8,8 +8,10 @@
 //!
 //! It also houses the CPU software rasterizer: [`Rasterizer`] implements
 //! [`rgfx_core::SceneRenderer`], running the full transform → near-clip → project → cull →
-//! barycentric-fill → depth-test pipeline with a [`ShadingMode`] (unlit, depth, or normals).
-//! Wireframe, lighting-based flat/smooth shading, and mesh loaders live in later tasks.
+//! barycentric-fill → depth-test → shade pipeline. Its [`ShadingMode`] covers unlit, flat and
+//! smooth Lambert lighting (ambient + directional diffuse), the normals and depth debug views,
+//! and a wireframe placeholder whose edge rasterization lands in a later task. Mesh loaders also
+//! live in later tasks.
 //!
 //! # Example
 //!
@@ -30,15 +32,21 @@
 #![forbid(unsafe_code)]
 
 mod framing;
+pub mod gltf;
+pub mod obj;
 mod orbit;
 mod raster;
+pub mod stl;
 
 pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
     perspective_fit_distance,
 };
+pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
+pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
 pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
+pub use stl::{StlOptions, StlStats, load_stl, load_stl_with_options};
 
 #[cfg(test)]
 mod tests {
