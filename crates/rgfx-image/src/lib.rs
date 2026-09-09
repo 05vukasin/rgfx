@@ -7,8 +7,10 @@
 //! one-frame [`rgfx_core::FrameSource`] via [`ImageSource`].
 //!
 //! It never touches the terminal or any encoder: everything converges on the
-//! framebuffer, per the rgfx architectural law. Dithering, tone mapping, and
-//! additional formats (WebP/BMP/GIF) live in sibling crates.
+//! framebuffer, per the rgfx architectural law. The image-quality stage —
+//! dithering ([`Dither`]) and tone controls ([`Tone`]), configured via
+//! [`Preprocess`] — runs here as an in-place framebuffer transform. Additional
+//! formats (WebP/BMP/GIF) live in sibling crates.
 //!
 //! # Aspect-ratio correction
 //!
@@ -35,11 +37,13 @@
 
 mod aspect;
 mod decode;
+mod preprocess;
 mod render;
 mod source;
 
 pub use aspect::{fit_dimensions, pixel_aspect};
 pub use decode::DecodedImage;
+pub use preprocess::{BayerSize, Dither, Preprocess, Tone};
 pub use render::{RenderOptions, ResizeFilter};
 pub use source::ImageSource;
 
