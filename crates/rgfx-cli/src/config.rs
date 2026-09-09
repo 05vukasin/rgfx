@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{RenderOpts, Renderer, Shading};
+use crate::cli::{DitherMode, RenderOpts, Renderer, Shading};
 
 /// The on-disk configuration file (`config.toml`).
 ///
@@ -30,6 +30,8 @@ pub struct Config {
     pub three_d: ThreeDConfig,
     /// Video-specific defaults.
     pub video: VideoConfig,
+    /// Still-image defaults (tone + dithering).
+    pub image: ImageConfig,
 }
 
 impl Default for Config {
@@ -41,6 +43,32 @@ impl Default for Config {
             color: false,
             three_d: ThreeDConfig::default(),
             video: VideoConfig::default(),
+            image: ImageConfig::default(),
+        }
+    }
+}
+
+/// The `[image]` sub-table: image-quality defaults applied by the still-image viewer.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImageConfig {
+    /// Default dithering algorithm.
+    pub dither: DitherMode,
+    /// Default gamma exponent applied to luminance (`1.0` = identity).
+    pub gamma: f32,
+    /// Default contrast multiplier about mid-grey (`1.0` = identity).
+    pub contrast: f32,
+    /// Luma threshold used by the 1-bit dithering path.
+    pub threshold: f32,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        ImageConfig {
+            dither: DitherMode::Auto,
+            gamma: 1.0,
+            contrast: 1.0,
+            threshold: 0.5,
         }
     }
 }
@@ -142,6 +170,14 @@ pub struct Settings {
     pub fov_degrees: f32,
     /// Loop video playback.
     pub loop_playback: bool,
+    /// Effective dithering algorithm for the still-image viewer.
+    pub dither: DitherMode,
+    /// Effective gamma exponent applied to luminance (`1.0` = identity).
+    pub gamma: f32,
+    /// Effective contrast multiplier about mid-grey (`1.0` = identity).
+    pub contrast: f32,
+    /// Effective luma threshold used by the 1-bit dithering path.
+    pub threshold: f32,
     /// Optional output-file sink instead of the live terminal.
     pub output: Option<PathBuf>,
 }
@@ -163,6 +199,10 @@ impl Settings {
             wireframe: opts.wireframe || config.three_d.wireframe,
             fov_degrees: config.three_d.fov_degrees,
             loop_playback: config.video.loop_playback,
+            dither: opts.dither.unwrap_or(config.image.dither),
+            gamma: opts.gamma.unwrap_or(config.image.gamma),
+            contrast: opts.contrast.unwrap_or(config.image.contrast),
+            threshold: config.image.threshold,
             output: opts.output.clone(),
         }
     }
@@ -181,6 +221,38 @@ mod tests {
         assert!(!c.color);
         assert_eq!(c.three_d.shading, Shading::Flat);
         assert_eq!(c.video.max_fps, 0);
+        assert_eq!(c.image.dither, DitherMode::Auto);
+        assert_eq!(c.image.gamma, 1.0);
+        assert_eq!(c.image.contrast, 1.0);
+    }
+
+    #[test]
+    fn image_flags_override_config() {
+        let cfg = Config::from_toml(
+            r#"
+                [image]
+                dither = "floyd"
+                gamma = 2.2
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.image.dither, DitherMode::Floyd);
+        // Absent flags keep the file values; a present flag wins.
+        let s = Settings::resolve(&cfg, &RenderOpts::default());
+        assert_eq!(s.dither, DitherMode::Floyd);
+        assert_eq!(s.gamma, 2.2);
+
+        let s2 = Settings::resolve(
+            &cfg,
+            &RenderOpts {
+                dither: Some(DitherMode::Atkinson),
+                contrast: Some(1.5),
+                ..RenderOpts::default()
+            },
+        );
+        assert_eq!(s2.dither, DitherMode::Atkinson);
+        assert_eq!(s2.contrast, 1.5);
+        assert_eq!(s2.gamma, 2.2);
     }
 
     #[test]
@@ -260,7 +332,7 @@ mod tests {
             wireframe: true,
             color: true,
             width: Some(200),
-            output: None,
+            ..RenderOpts::default()
         };
         let s = Settings::resolve(&cfg, &opts);
         assert_eq!(s.renderer, Renderer::Braille);

@@ -1,96 +1,122 @@
-//! Terminal setup/teardown with guaranteed cleanup.
+//! Interactive terminal session for the viewers.
 //!
-//! The real terminal I/O (raw mode, alternate screen, cursor hiding) lives in `rgfx-terminal`,
-//! which is being built in parallel. Until this crate depends on it (a later task), this module
-//! provides the *shape* of the lifecycle: a [`TerminalGuard`] that "enters" on construction and
-//! "leaves" on `Drop`, so cleanup runs on every exit path — normal return, `?` error unwinding,
-//! and panic. Task 020 owns dispatch, not rendering, so the actual escape sequences are stubbed
-//! and only traced.
+//! [`Session`] wraps [`rgfx_terminal::Terminal`] — the RAII lifecycle guard that enters raw mode
+//! plus the alternate screen on open and restores the terminal on every exit path (normal drop,
+//! error, or panic). Viewers use it to query the current [`Viewport`], present an encoded frame,
+//! and wait for input, without depending on `crossterm` types directly.
+//!
+//! Event handling is split into two pure, TTY-free functions (`is_quit` and `signal_for`) so
+//! the input policy is unit-testable; only [`Session`] itself needs a real terminal.
+
+use std::time::Duration;
 
 use rgfx_core::Viewport;
+use rgfx_terminal::{Event, KeyCode, KeyEvent, Terminal, TerminalOptions};
 
-/// A RAII guard around the terminal's raw/alternate-screen state.
-///
-/// Construct it with [`TerminalGuard::enter`] before rendering; when it drops (including during
-/// unwind), [`TerminalGuard::leave`] runs, restoring the terminal. Because teardown is in
-/// `Drop`, a panic or an early `?` still restores the terminal.
-#[derive(Debug)]
-pub struct TerminalGuard {
-    viewport: Viewport,
-    active: bool,
+/// What a polled input event means for a viewer's render loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// The user asked to quit; the loop should exit and restore the terminal.
+    Quit,
+    /// The viewport changed; the loop should re-render.
+    Redraw,
+    /// Nothing actionable happened; keep idling.
+    Idle,
 }
 
-impl TerminalGuard {
-    /// Enters "rendering mode".
+/// Whether a key event is a quit request: `q`/`Q`, `Esc`, or `Ctrl+C`.
+pub(crate) fn is_quit(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Char('q') | KeyCode::Char('Q') => true,
+        KeyCode::Char('c') | KeyCode::Char('C') => key.modifiers.ctrl,
+        _ => false,
+    }
+}
+
+/// Maps an input [`Event`] to the render-loop [`Signal`] it implies.
+pub(crate) fn signal_for(event: Event) -> Signal {
+    match event {
+        Event::Key(key) if is_quit(key) => Signal::Quit,
+        Event::Resize(_, _) => Signal::Redraw,
+        _ => Signal::Idle,
+    }
+}
+
+/// A live interactive terminal session that restores the terminal when dropped.
+#[derive(Debug)]
+pub struct Session {
+    term: Terminal,
+}
+
+impl Session {
+    /// Enters graphics mode on the real terminal (raw mode, alternate screen, hidden cursor).
     ///
-    /// In the full implementation this enables raw mode, switches to the alternate screen and
-    /// hides the cursor via `rgfx-terminal`. Here it only records the viewport and traces the
-    /// transition.
-    pub fn enter() -> anyhow::Result<Self> {
-        let viewport = query_viewport();
-        tracing::debug!(
-            cols = viewport.cols,
-            rows = viewport.rows,
-            "terminal: enter (stub)"
-        );
-        Ok(TerminalGuard {
-            viewport,
-            active: true,
+    /// Installs the process-wide panic hook so a crash still restores the terminal. Fails cleanly
+    /// (returning an error, never a panic) when there is no controlling TTY.
+    pub fn open() -> anyhow::Result<Self> {
+        let term = Terminal::new(TerminalOptions::default())?;
+        Ok(Self { term })
+    }
+
+    /// The current terminal size in character cells.
+    pub fn viewport(&self) -> anyhow::Result<Viewport> {
+        Ok(self.term.size()?)
+    }
+
+    /// Presents an encoded frame: homes the cursor and clears the screen, then writes the text as
+    /// a single batched flush so the frame appears without tearing.
+    pub fn present(&mut self, text: &str) -> anyhow::Result<()> {
+        self.term.present_raw(&format!("\x1b[H\x1b[2J{text}"))?;
+        Ok(())
+    }
+
+    /// Waits up to `timeout` for an input event and classifies it. `Idle` on timeout.
+    pub fn wait(&mut self, timeout: Duration) -> anyhow::Result<Signal> {
+        Ok(match self.term.poll_event(timeout)? {
+            Some(event) => signal_for(event),
+            None => Signal::Idle,
         })
     }
-
-    /// The current terminal viewport in character cells.
-    pub fn viewport(&self) -> Viewport {
-        self.viewport
-    }
-
-    /// Explicit teardown. Idempotent; `Drop` also calls this.
-    pub fn leave(&mut self) {
-        if self.active {
-            self.active = false;
-            tracing::debug!("terminal: leave (stub)");
-        }
-    }
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        self.leave();
-    }
-}
-
-/// Queries the terminal size, falling back to a conventional 80×24 when it is unavailable
-/// (not a TTY, or output redirected to a file).
-///
-/// This is intentionally dependency-free for the skeleton; the real size query moves to
-/// `rgfx-terminal` in a later task.
-pub fn query_viewport() -> Viewport {
-    fn parse_env(key: &str) -> Option<u16> {
-        std::env::var(key).ok()?.parse().ok()
-    }
-    let cols = parse_env("COLUMNS").filter(|&c| c > 0).unwrap_or(80);
-    let rows = parse_env("LINES").filter(|&r| r > 0).unwrap_or(24);
-    Viewport::new(cols, rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rgfx_terminal::KeyModifiers;
 
-    #[test]
-    fn guard_enters_and_leaves() {
-        let mut g = TerminalGuard::enter().unwrap();
-        assert!(g.active);
-        g.leave();
-        assert!(!g.active);
-        // Second leave is a no-op.
-        g.leave();
-        assert!(!g.active);
+    fn key(code: KeyCode, ctrl: bool) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers {
+                ctrl,
+                ..KeyModifiers::NONE
+            },
+        }
     }
 
     #[test]
-    fn viewport_has_positive_dimensions() {
-        let vp = query_viewport();
-        assert!(vp.cols > 0 && vp.rows > 0);
+    fn quit_keys_are_recognized() {
+        assert!(is_quit(key(KeyCode::Esc, false)));
+        assert!(is_quit(key(KeyCode::Char('q'), false)));
+        assert!(is_quit(key(KeyCode::Char('Q'), false)));
+        assert!(is_quit(key(KeyCode::Char('c'), true)));
+        // Plain 'c' without Ctrl is not a quit.
+        assert!(!is_quit(key(KeyCode::Char('c'), false)));
+        assert!(!is_quit(key(KeyCode::Char('x'), false)));
+    }
+
+    #[test]
+    fn resize_signals_redraw_and_keys_map_through() {
+        assert_eq!(signal_for(Event::Resize(120, 40)), Signal::Redraw);
+        assert_eq!(
+            signal_for(Event::Key(key(KeyCode::Esc, false))),
+            Signal::Quit
+        );
+        assert_eq!(
+            signal_for(Event::Key(key(KeyCode::Char('x'), false))),
+            Signal::Idle
+        );
+        assert_eq!(signal_for(Event::FocusGained), Signal::Idle);
     }
 }
