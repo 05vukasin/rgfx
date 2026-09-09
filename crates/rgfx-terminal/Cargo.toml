@@ -1,0 +1,12 @@
+[package]
+name = "rgfx-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Safe terminal lifecycle, input events, and buffered output for rgfx"
+
+[dependencies]
+rgfx-core = { path = "../rgfx-core" }
+crossterm.workspace = true
