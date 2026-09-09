@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "3D math, camera controls, and automatic model framing for rgfx"
+keywords = ["3d", "obj", "stl", "gltf", "rendering"]
+categories = ["rendering", "graphics", "mathematics"]
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }

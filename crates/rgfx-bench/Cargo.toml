@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Criterion benchmarks and procedural mesh generators for the rgfx rendering pipeline"
+publish = false
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }

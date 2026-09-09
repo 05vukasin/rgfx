@@ -1,0 +1,44 @@
+# Maintainer: The rgfx authors <noreply@example.com>
+#
+# rgfx — stable source build from a tagged GitHub release.
+# Before submitting to the AUR, regenerate the checksum with `updpkgsums`.
+
+pkgname=rgfx
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Universal terminal graphics engine: images, video, animation, and interactive 3D previews"
+arch=('x86_64' 'aarch64')
+url="https://github.com/05vukasin/rgfx"
+license=('MIT OR Apache-2.0')
+depends=('gcc-libs')
+makedepends=('cargo')
+optdepends=('ffmpeg: video decoding and playback')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/05vukasin/rgfx/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --bin rgfx
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/rgfx" "$pkgdir/usr/bin/rgfx"
+    install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

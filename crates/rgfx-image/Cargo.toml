@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Still-image (PNG/JPEG/WebP/BMP) and animated-GIF decode, aspect-correct resize, and framebuffer conversion for rgfx"
+keywords = ["terminal", "image", "graphics", "ascii", "braille"]
+categories = ["multimedia::images", "command-line-utilities", "graphics"]
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }
