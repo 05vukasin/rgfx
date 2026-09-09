@@ -36,6 +36,7 @@ pub mod gltf;
 pub mod obj;
 mod orbit;
 mod raster;
+pub mod stl;
 
 pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
@@ -45,6 +46,7 @@ pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
 pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
 pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
+pub use stl::{StlOptions, StlStats, load_stl, load_stl_with_options};
 
 #[cfg(test)]
 mod tests {
