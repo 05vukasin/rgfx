@@ -49,19 +49,35 @@ impl MediaViewer for ImageViewer {
         let path = match request.input {
             Input::File(p) => p.as_path(),
             Input::Stdin => {
-                anyhow::bail!(
-                    "reading images from stdin is not yet implemented (arrives in task 025)"
-                )
+                // The `-` path is handled earlier by `crate::stream`, which buffers stdin and
+                // calls `view_decoded` directly; the viewer trait only ever sees a file here.
+                anyhow::bail!("reading images from stdin goes through the pipe path (`rgfx -`)")
             }
         };
         let image = DecodedImage::load(path)
             .with_context(|| format!("loading image {}", path.display()))?;
 
-        match &request.settings.output {
-            Some(out) => write_output(&image, request.settings, out),
-            None => run_interactive(&image, request.settings),
-        }
+        view_decoded(&image, request.settings)
     }
+}
+
+/// Renders an already-decoded image (e.g. buffered from stdin) either to `--output` or the live
+/// terminal. This is the shared core of the still-image path, independent of where the bytes came
+/// from.
+pub(crate) fn view_decoded(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
+    match &settings.output {
+        Some(out) => write_output(image, settings, out),
+        None => run_interactive(image, settings),
+    }
+}
+
+/// Renders a decoded image to encoded text at the non-interactive size (no terminal is entered).
+///
+/// Used by the `--output` sink and by tests. The size follows `--width`, falling back to a
+/// default column count.
+pub(crate) fn render_to_text(image: &DecodedImage, settings: &Settings) -> String {
+    let mut fb = Framebuffer::new(0, 0);
+    render_frame(image, settings, None, &mut fb).to_text()
 }
 
 /// The concrete grayscale encoder selected from the [`Renderer`] setting.
@@ -224,9 +240,7 @@ fn render_frame(
 
 /// Writes the encoded image to `out` as text (`--output`). Non-interactive: no terminal is entered.
 fn write_output(image: &DecodedImage, settings: &Settings, out: &Path) -> anyhow::Result<()> {
-    let mut fb = Framebuffer::new(0, 0);
-    let frame = render_frame(image, settings, None, &mut fb);
-    std::fs::write(out, frame.to_text())
+    std::fs::write(out, render_to_text(image, settings))
         .with_context(|| format!("writing output to {}", out.display()))?;
     tracing::info!(path = %out.display(), "wrote encoded image");
     Ok(())

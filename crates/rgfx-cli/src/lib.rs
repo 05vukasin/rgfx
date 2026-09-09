@@ -14,6 +14,8 @@
 //! - [`info`] — the non-interactive `info <FILE>` metadata report (aligned text or `--json`).
 //! - [`terminal`] — an interactive [`terminal::Session`] over `rgfx-terminal` that guarantees
 //!   terminal cleanup on every exit path.
+//! - [`stream`] — the stdin/pipe paths: `rgfx -` (buffer + sniff a still image) and `--stream`
+//!   (a minimal framed protocol rendered continuously via a [`rgfx_core::FrameSource`]).
 //! - [`app`] — the [`app::run`] entry point that loads config and dispatches.
 //!
 //! The one architectural law still holds here: this crate never decodes or rasterizes media
@@ -30,6 +32,7 @@ pub mod image_viewer;
 pub mod info;
 pub mod media;
 pub mod mesh_viewer;
+pub mod stream;
 pub mod terminal;
 
 pub use app::run;

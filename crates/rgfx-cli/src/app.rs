@@ -5,8 +5,6 @@
 //! dispatches to a viewer; each interactive viewer owns its own terminal session (which restores
 //! the terminal on every exit path), while `--output` renders non-interactively with no terminal.
 
-use std::io::Read;
-
 use crate::cli::{Cli, Command};
 use crate::config::{Config, Settings};
 use crate::dispatch;
@@ -23,17 +21,21 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     match cli.command {
         Some(Command::Info { file, json }) => crate::info::run(&file, json),
-        None => match cli.file.clone() {
-            Some(file) => {
-                let settings = Settings::resolve(&config, &cli.render);
-                run_render(&file, &settings)
+        None => {
+            let settings = Settings::resolve(&config, &cli.render);
+            if cli.render.stream {
+                // `--stream` reads a framed protocol from stdin regardless of any FILE argument.
+                return crate::stream::run_stream(&settings);
             }
-            None => {
-                // No file and no subcommand: print help and exit cleanly (not an error).
-                print_usage_hint();
-                Ok(())
+            match cli.file.clone() {
+                Some(file) => run_render(&file, &settings),
+                None => {
+                    // No file and no subcommand: print help and exit cleanly (not an error).
+                    print_usage_hint();
+                    Ok(())
+                }
             }
-        },
+        }
     }
 }
 
@@ -55,6 +57,11 @@ fn init_tracing() {
 /// Handles the render path for a single input.
 fn run_render(file: &str, settings: &Settings) -> anyhow::Result<()> {
     let input = Input::parse(file);
+    // `-` buffers the whole of stdin, sniffs it, and routes a still image to the viewer. This
+    // must happen before any peek at stdin, since stdin is not seekable.
+    if matches!(input, Input::Stdin) {
+        return crate::stream::run_stdin(settings);
+    }
     let kind = detect_kind(&input)?;
 
     if !kind.is_supported() {
@@ -69,19 +76,12 @@ fn run_render(file: &str, settings: &Settings) -> anyhow::Result<()> {
     dispatch::dispatch(&input, kind, settings)
 }
 
-/// Detects the media kind of an input, reading a stdin peek when needed.
+/// Detects the media kind of a file input from its magic bytes and extension.
+///
+/// The stdin (`-`) case never reaches here: [`run_render`] intercepts it and routes to
+/// [`crate::stream`], which buffers and sniffs the whole stream (stdin is not seekable).
 fn detect_kind(input: &Input) -> anyhow::Result<MediaKind> {
-    match input {
-        Input::File(_) => Ok(media::detect(input)?),
-        Input::Stdin => {
-            // stdin is not seekable: peek the leading bytes for magic detection. The real
-            // render path (later tasks) will need to buffer the whole stream; the skeleton only
-            // classifies.
-            let mut buf = [0u8; 16];
-            let n = std::io::stdin().lock().read(&mut buf).unwrap_or(0);
-            Ok(media::detect_bytes(&buf[..n], None))
-        }
-    }
+    Ok(media::detect(input)?)
 }
 
 /// Prints a short hint when invoked with no file and no subcommand.
