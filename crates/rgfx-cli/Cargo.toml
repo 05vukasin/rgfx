@@ -1,0 +1,25 @@
+[package]
+name = "rgfx-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The rgfx command-line binary: argument parsing, media detection, config, and viewer dispatch."
+
+[[bin]]
+name = "rgfx"
+path = "src/main.rs"
+
+[lib]
+name = "rgfx_cli"
+path = "src/lib.rs"
+
+[dependencies]
+rgfx-core = { path = "../rgfx-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

@@ -1,0 +1,274 @@
+//! `rgfx-3d`: the 3D math, camera-controls, and automatic-framing layer for rgfx.
+//!
+//! [`rgfx_core`] owns the camera *data* and its view/projection matrices, plus the mesh and
+//! bounds primitives ([`rgfx_core::Camera`], [`rgfx_core::BoundingSphere`], …). This crate adds
+//! the *controls* on top: an [`OrbitController`] for interactive orbit/zoom/pan/reset around a
+//! target, and automatic model framing that positions the camera so a bounding sphere fits the
+//! viewport with sensible clip planes.
+//!
+//! It is deliberately small and free of rendering: rasterization, wireframe, shading, and mesh
+//! loaders live in later tasks. Everything here is pure `glam` math on the core camera type, so
+//! both the interactive viewer and the one-shot renderer can share it.
+//!
+//! # Example
+//!
+//! ```
+//! use glam::Vec3;
+//! use rgfx_core::{BoundingSphere, Camera};
+//! use rgfx_3d::OrbitController;
+//!
+//! let mut camera = Camera::perspective(16.0 / 9.0, 60_f32.to_radians());
+//! let sphere = BoundingSphere { center: Vec3::ZERO, radius: 1.0 };
+//!
+//! let mut controls = OrbitController::from_camera(&camera);
+//! controls.auto_frame(&mut camera, &sphere, 16.0 / 9.0);
+//! controls.orbit(30_f32.to_radians(), 15_f32.to_radians());
+//! controls.sync(&mut camera);
+//! ```
+#![warn(missing_docs)]
+#![forbid(unsafe_code)]
+
+mod framing;
+mod orbit;
+
+pub use framing::{
+    DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
+    perspective_fit_distance,
+};
+pub use orbit::OrbitController;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec3;
+    use rgfx_core::{BoundingSphere, Camera, Projection};
+
+    const EPS: f32 = 1e-4;
+
+    fn approx(a: Vec3, b: Vec3, eps: f32) -> bool {
+        (a - b).length() < eps
+    }
+
+    // --- Orbit state / camera position math ---------------------------------------------------
+
+    #[test]
+    fn default_orientation_sits_on_plus_z() {
+        let c = OrbitController::new(Vec3::ZERO, 3.0);
+        assert!(approx(c.position(), Vec3::new(0.0, 0.0, 3.0), EPS));
+        assert!(approx(c.direction(), Vec3::Z, EPS));
+    }
+
+    #[test]
+    fn sync_places_target_at_expected_camera_space_depth() {
+        // Hand reference: camera at (0,0,3) looking at origin -> origin maps to (0,0,-3).
+        let c = OrbitController::new(Vec3::ZERO, 3.0);
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+        let p = cam.view_matrix().transform_point3(Vec3::ZERO);
+        assert!(p.x.abs() < EPS && p.y.abs() < EPS);
+        assert!((p.z + 3.0).abs() < EPS);
+    }
+
+    #[test]
+    fn synced_target_projects_to_screen_center() {
+        let mut c = OrbitController::new(Vec3::new(1.0, 2.0, -3.0), 5.0);
+        c.orbit(0.7, 0.3);
+        let mut cam = Camera::perspective(1.5, 50_f32.to_radians());
+        c.sync(&mut cam);
+        let ndc = cam.view_projection().project_point3(c.target());
+        assert!(ndc.x.abs() < EPS && ndc.y.abs() < EPS);
+    }
+
+    #[test]
+    fn yaw_ninety_degrees_moves_camera_onto_plus_x() {
+        let mut c = OrbitController::new(Vec3::ZERO, 2.0);
+        c.orbit(std::f32::consts::FRAC_PI_2, 0.0);
+        assert!(approx(c.position(), Vec3::new(2.0, 0.0, 0.0), EPS));
+    }
+
+    #[test]
+    fn from_camera_round_trips_position() {
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        cam.position = Vec3::new(3.0, 4.0, 5.0);
+        cam.target = Vec3::new(1.0, 0.0, -1.0);
+        let c = OrbitController::from_camera(&cam);
+        assert!(approx(c.position(), cam.position, 1e-3));
+        assert!(approx(c.target(), cam.target, EPS));
+    }
+
+    // --- Orbit / zoom / pan / reset invariants ------------------------------------------------
+
+    #[test]
+    fn orbit_full_turn_returns_to_start() {
+        let mut c = OrbitController::new(Vec3::ZERO, 4.0);
+        c.orbit(0.0, 0.4); // some pitch
+        let before = c.position();
+        c.orbit(std::f32::consts::TAU, 0.0); // full yaw turn
+        assert!(approx(c.position(), before, EPS));
+    }
+
+    #[test]
+    fn pitch_is_clamped_short_of_the_pole() {
+        let mut c = OrbitController::new(Vec3::ZERO, 1.0);
+        c.orbit(0.0, 100.0); // absurd upward tilt
+        assert!(c.pitch() < std::f32::consts::FRAC_PI_2);
+        // View basis must stay finite / non-degenerate.
+        assert!(c.position().is_finite());
+    }
+
+    #[test]
+    fn zoom_scales_distance_and_clamps_positive() {
+        let mut c = OrbitController::new(Vec3::ZERO, 10.0);
+        c.zoom(0.5);
+        assert!((c.distance() - 5.0).abs() < EPS);
+        c.zoom(-1.0); // invalid -> ignored
+        assert!((c.distance() - 5.0).abs() < EPS);
+        c.zoom(1e-9); // clamps to minimum, stays positive
+        assert!(c.distance() > 0.0);
+    }
+
+    #[test]
+    fn dolly_adds_distance() {
+        let mut c = OrbitController::new(Vec3::ZERO, 5.0);
+        c.dolly(2.0);
+        assert!((c.distance() - 7.0).abs() < EPS);
+        c.dolly(-100.0); // clamps to minimum
+        assert!(c.distance() > 0.0);
+    }
+
+    #[test]
+    fn pan_moves_target_in_view_plane_only() {
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        let dir_before = c.direction();
+        let dist_before = c.distance();
+        c.pan(2.0, 1.0);
+        // Default orientation: right = +X, up = +Y, so target shifts by (2,1,0).
+        assert!(approx(c.target(), Vec3::new(2.0, 1.0, 0.0), EPS));
+        // Panning preserves the view direction and distance.
+        assert!(approx(c.direction(), dir_before, EPS));
+        assert!((c.distance() - dist_before).abs() < EPS);
+    }
+
+    #[test]
+    fn reset_restores_initial_state() {
+        let mut c = OrbitController::new(Vec3::new(1.0, 1.0, 1.0), 4.0);
+        let home_pos = c.position();
+        c.orbit(1.0, 0.5);
+        c.zoom(2.0);
+        c.pan(3.0, -2.0);
+        c.reset();
+        assert!(approx(c.position(), home_pos, EPS));
+    }
+
+    // --- Auto framing -------------------------------------------------------------------------
+
+    /// Sample points across a sphere's surface, returning true if every one projects inside the
+    /// clip cube (`|x| <= 1`, `|y| <= 1`) for the given camera.
+    fn sphere_fits(cam: &Camera, sphere: &BoundingSphere) -> bool {
+        let vp = cam.view_projection();
+        let steps = 16;
+        for i in 0..=steps {
+            let phi = std::f32::consts::PI * (i as f32 / steps as f32); // 0..pi
+            for j in 0..steps {
+                let theta = std::f32::consts::TAU * (j as f32 / steps as f32); // 0..2pi
+                let dir = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
+                let p = sphere.center + dir * sphere.radius;
+                let ndc = vp.project_point3(p);
+                if ndc.x.abs() > 1.0 + 1e-3 || ndc.y.abs() > 1.0 + 1e-3 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn auto_frame_fits_unit_sphere_for_several_aspects() {
+        let sphere = BoundingSphere {
+            center: Vec3::new(2.0, -1.0, 0.5),
+            radius: 1.0,
+        };
+        for &aspect in &[0.5_f32, 1.0, 4.0 / 3.0, 16.0 / 9.0, 2.5] {
+            let mut cam = Camera::perspective(aspect, 60_f32.to_radians());
+            let mut c = OrbitController::from_camera(&cam);
+            c.auto_frame(&mut cam, &sphere, aspect);
+
+            assert!(cam.near > 0.0, "near must stay positive");
+            assert!(cam.far > cam.near, "far must exceed near");
+            assert!(approx(cam.target, sphere.center, EPS), "target centered");
+            assert!(
+                sphere_fits(&cam, &sphere),
+                "sphere must fit for aspect {aspect}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_frame_fits_orthographic_camera() {
+        let sphere = BoundingSphere {
+            center: Vec3::ZERO,
+            radius: 2.0,
+        };
+        for &aspect in &[0.5_f32, 1.0, 2.0] {
+            let mut cam = Camera::orthographic(aspect, 1.0);
+            let mut c = OrbitController::from_camera(&cam);
+            c.auto_frame(&mut cam, &sphere, aspect);
+            assert!(matches!(cam.projection, Projection::Orthographic { .. }));
+            assert!(cam.near > 0.0 && cam.far > cam.near);
+            assert!(
+                sphere_fits(&cam, &sphere),
+                "ortho sphere must fit for aspect {aspect}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_frame_preserves_view_direction() {
+        let sphere = BoundingSphere {
+            center: Vec3::ZERO,
+            radius: 1.0,
+        };
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        let mut c = OrbitController::from_camera(&cam);
+        c.orbit(0.9, 0.4);
+        c.sync(&mut cam);
+        let dir_before = c.direction();
+        c.auto_frame(&mut cam, &sphere, 1.0);
+        assert!(approx(c.direction(), dir_before, EPS));
+    }
+
+    #[test]
+    fn auto_frame_sets_reset_home() {
+        let sphere = BoundingSphere {
+            center: Vec3::new(5.0, 5.0, 5.0),
+            radius: 1.0,
+        };
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        c.auto_frame(&mut cam, &sphere, 1.0);
+        let framed = c.position();
+        c.orbit(1.0, 0.5);
+        c.reset();
+        assert!(approx(c.position(), framed, EPS));
+    }
+
+    // --- Framing math free functions ----------------------------------------------------------
+
+    #[test]
+    fn free_function_frame_matches_controller() {
+        let sphere = BoundingSphere {
+            center: Vec3::ZERO,
+            radius: 1.0,
+        };
+        let mut cam = Camera::perspective(1.5, 60_f32.to_radians());
+        frame_camera(&mut cam, &sphere, 1.5);
+        assert!(sphere_fits(&cam, &sphere));
+    }
+
+    #[test]
+    fn perspective_fit_distance_grows_with_radius() {
+        let d1 = perspective_fit_distance(1.0, 60_f32.to_radians(), 1.0, DEFAULT_FRAMING_MARGIN);
+        let d2 = perspective_fit_distance(2.0, 60_f32.to_radians(), 1.0, DEFAULT_FRAMING_MARGIN);
+        assert!((d2 - 2.0 * d1).abs() < 1e-3);
+    }
+}
