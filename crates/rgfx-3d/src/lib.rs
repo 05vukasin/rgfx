@@ -6,9 +6,10 @@
 //! target, and automatic model framing that positions the camera so a bounding sphere fits the
 //! viewport with sensible clip planes.
 //!
-//! It is deliberately small and free of rendering: rasterization, wireframe, shading, and mesh
-//! loaders live in later tasks. Everything here is pure `glam` math on the core camera type, so
-//! both the interactive viewer and the one-shot renderer can share it.
+//! It also houses the CPU software rasterizer: [`Rasterizer`] implements
+//! [`rgfx_core::SceneRenderer`], running the full transform → near-clip → project → cull →
+//! barycentric-fill → depth-test pipeline with a [`ShadingMode`] (unlit, depth, or normals).
+//! Wireframe, lighting-based flat/smooth shading, and mesh loaders live in later tasks.
 //!
 //! # Example
 //!
@@ -30,12 +31,14 @@
 
 mod framing;
 mod orbit;
+mod raster;
 
 pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
     perspective_fit_distance,
 };
 pub use orbit::OrbitController;
+pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
 
 #[cfg(test)]
 mod tests {
