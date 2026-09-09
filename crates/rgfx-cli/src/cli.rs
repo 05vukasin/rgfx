@@ -36,6 +36,10 @@ pub enum Command {
         /// File to inspect, or `-` for standard input.
         #[arg(value_name = "FILE")]
         file: String,
+
+        /// Emit the report as machine-readable JSON instead of aligned text.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -200,7 +204,22 @@ mod tests {
     fn info_subcommand() {
         let cli = parse(&["rgfx", "info", "scene.glb"]);
         match cli.command {
-            Some(Command::Info { file }) => assert_eq!(file, "scene.glb"),
+            Some(Command::Info { file, json }) => {
+                assert_eq!(file, "scene.glb");
+                assert!(!json, "json defaults to false");
+            }
+            other => panic!("expected info subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn info_subcommand_with_json_flag() {
+        let cli = parse(&["rgfx", "info", "scene.glb", "--json"]);
+        match cli.command {
+            Some(Command::Info { file, json }) => {
+                assert_eq!(file, "scene.glb");
+                assert!(json, "--json must set the flag");
+            }
             other => panic!("expected info subcommand, got {other:?}"),
         }
     }

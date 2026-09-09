@@ -22,7 +22,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     let config = Config::load()?;
 
     match cli.command {
-        Some(Command::Info { file }) => run_info(&file),
+        Some(Command::Info { file, json }) => crate::info::run(&file, json),
         None => match cli.file.clone() {
             Some(file) => {
                 let settings = Settings::resolve(&config, &cli.render);
@@ -50,16 +50,6 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
-}
-
-/// Handles `rgfx info <FILE>`: detect and describe, without rendering.
-fn run_info(file: &str) -> anyhow::Result<()> {
-    let input = Input::parse(file);
-    let kind = detect_kind(&input)?;
-    println!("input:  {}", input.label());
-    println!("kind:   {}", describe_kind(kind));
-    println!("viewer: {}", viewer_label(kind));
-    Ok(())
 }
 
 /// Handles the render path for a single input.
@@ -94,28 +84,6 @@ fn detect_kind(input: &Input) -> anyhow::Result<MediaKind> {
     }
 }
 
-/// A short description of a media kind for `info` output.
-fn describe_kind(kind: MediaKind) -> &'static str {
-    use media::MeshFormat::*;
-    match kind {
-        MediaKind::Image => "image",
-        MediaKind::Gif => "animated gif",
-        MediaKind::Video => "video",
-        MediaKind::Mesh(Obj) => "3D mesh (OBJ)",
-        MediaKind::Mesh(Stl) => "3D mesh (STL)",
-        MediaKind::Mesh(Gltf) => "3D mesh (glTF/GLB)",
-        MediaKind::Unknown => "unknown",
-    }
-}
-
-/// The viewer that would handle a kind, for `info` output.
-fn viewer_label(kind: MediaKind) -> &'static str {
-    match dispatch::viewer_for(kind) {
-        Ok(v) => v.name(),
-        Err(_) => "none (unsupported)",
-    }
-}
-
 /// Prints a short hint when invoked with no file and no subcommand.
 fn print_usage_hint() {
     println!("rgfx: no input given. Try `rgfx <FILE>`, `rgfx info <FILE>`, or `rgfx --help`.");
@@ -126,10 +94,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn info_on_unknown_is_ok_and_labels_unsupported() {
-        // `info` never fails on unknown input; it just reports it.
-        assert!(run_info("mystery.dat").is_ok());
-        assert_eq!(viewer_label(MediaKind::Unknown), "none (unsupported)");
+    fn info_on_unknown_is_clean_error() {
+        // `info` on unrecognized input errors cleanly (never panics); the detailed
+        // per-kind behavior is covered by `crate::info` tests.
+        let err = crate::info::run("mystery.dat", false).unwrap_err();
+        assert!(err.to_string().contains("unsupported"), "got: {err}");
     }
 
     #[test]
@@ -146,13 +115,5 @@ mod tests {
         let settings = Settings::resolve(&Config::default(), &Default::default());
         let err = run_render("does-not-exist.png", &settings).unwrap_err();
         assert!(err.to_string().contains("loading image"), "got: {err}");
-    }
-
-    #[test]
-    fn describe_covers_all_kinds() {
-        use media::MeshFormat::*;
-        assert_eq!(describe_kind(MediaKind::Image), "image");
-        assert_eq!(describe_kind(MediaKind::Mesh(Stl)), "3D mesh (STL)");
-        assert_eq!(describe_kind(MediaKind::Unknown), "unknown");
     }
 }
