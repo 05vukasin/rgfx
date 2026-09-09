@@ -33,6 +33,7 @@
 
 mod framing;
 pub mod gltf;
+pub mod obj;
 mod orbit;
 mod raster;
 
@@ -41,6 +42,7 @@ pub use framing::{
     perspective_fit_distance,
 };
 pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
+pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
 pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
 

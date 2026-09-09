@@ -5,9 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Still-image (PNG/JPEG) decode, aspect-correct resize, and framebuffer conversion for rgfx"
+description = "Still-image (PNG/JPEG/WebP/BMP) and animated-GIF decode, aspect-correct resize, and framebuffer conversion for rgfx"
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }
-image.workspace = true
+# Explicitly opt into every format this crate decodes so the build does not rely
+# on `image`'s default feature set staying constant. Features are additive over
+# the workspace default, so PNG/JPEG stay enabled too.
+image = { workspace = true, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 thiserror.workspace = true
