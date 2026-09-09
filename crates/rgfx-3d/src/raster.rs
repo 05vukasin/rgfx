@@ -21,8 +21,12 @@
 //! The rasterizer never allocates per frame and never touches stdout. Off-screen or degenerate
 //! triangles are dropped without panicking or writing out of bounds.
 
+use std::collections::HashSet;
+
 use glam::{Mat4, Vec2, Vec3, Vec4, Vec4Swizzles};
 use rgfx_core::{Camera, Color, Error, Framebuffer, Result, Scene, SceneRenderer, Vertex};
+
+use crate::line::draw_line;
 
 /// The depth value of a cleared framebuffer (the far plane), matching `rgfx_core`'s framebuffer
 /// contract. Fragments must be strictly nearer than this (and any prior fragment) to be written.
@@ -73,11 +77,12 @@ pub enum ShadingMode {
     Normals,
     /// Visualize depth as grayscale: nearer fragments are brighter, farther ones darker.
     Depth,
-    /// Draw only the triangle edges.
+    /// Draw only the mesh edges as lines in the base color, leaving faces empty.
     ///
-    /// Line rasterization is implemented in a later task (012); until then this mode fills each
-    /// triangle solid with the base color so the mode is selectable, leaving a clear seam for the
-    /// edge pass to replace.
+    /// Unlike the filled modes, wireframe has a dedicated pass (see
+    /// [`SceneRenderer::render`]): it deduplicates the triangle edges, clips each edge segment to
+    /// the near plane, projects it, and rasterizes it with [`crate::draw_line`]. It performs no
+    /// depth test, so every edge is drawn (no hidden-line removal).
     Wireframe,
 }
 
@@ -273,8 +278,9 @@ impl Rasterizer {
                 let g = (1.0 - frag_depth).clamp(0.0, 1.0);
                 Color::rgb(g, g, g)
             }
-            // SEAM (task 012): wireframe replaces this solid fill with edge-only line
-            // rasterization. Until then the mode is selectable and paints the base color.
+            // Wireframe is drawn by a dedicated edge pass in `render`, so this fill path is not
+            // reached for it; the arm keeps `shade` total and paints the base color as a
+            // defensive fallback.
             ShadingMode::Wireframe => self.base_opaque(),
         }
     }
@@ -313,8 +319,52 @@ fn geometric_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     (b - a).cross(c - a).normalize_or_zero()
 }
 
+impl Rasterizer {
+    /// Renders `scene` as a wireframe: deduplicated mesh edges drawn as lines in the base color.
+    ///
+    /// This is the pass used by [`SceneRenderer::render`] when [`Rasterizer::shading`] is
+    /// [`ShadingMode::Wireframe`]. It clears `target`, then for each mesh transforms and
+    /// near-clips every unique triangle edge, projects it, and rasterizes it with
+    /// [`crate::draw_line`]. No depth test is applied (all edges are drawn). An out-of-range
+    /// triangle index yields an [`Error::Geometry`] rather than a panic.
+    pub fn render_wireframe(
+        &self,
+        scene: &Scene,
+        camera: &Camera,
+        target: &mut Framebuffer,
+    ) -> Result<()> {
+        target.clear(self.clear_color);
+        let (w, h) = (target.width(), target.height());
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+        let view_proj = camera.view_projection();
+        let color = self.base_opaque();
+        for mesh in &scene.meshes {
+            let verts = &mesh.vertices;
+            for (i0, i1) in dedup_edges(&mesh.indices) {
+                let a = fetch(verts, i0)?;
+                let b = fetch(verts, i1)?;
+                let ca = view_proj * a.position.extend(1.0);
+                let cb = view_proj * b.position.extend(1.0);
+                let Some((ca, cb)) = clip_segment_near(ca, cb) else {
+                    continue;
+                };
+                let (Some(pa), Some(pb)) = (project_clip(ca, w, h), project_clip(cb, w, h)) else {
+                    continue;
+                };
+                draw_line(target, pa.0, pa.1, pb.0, pb.1, color);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl SceneRenderer for Rasterizer {
     fn render(&mut self, scene: &Scene, camera: &Camera, target: &mut Framebuffer) -> Result<()> {
+        if self.shading == ShadingMode::Wireframe {
+            return self.render_wireframe(scene, camera, target);
+        }
         target.clear(self.clear_color);
         let view_proj = camera.view_projection();
         for mesh in &scene.meshes {
@@ -350,6 +400,66 @@ fn fetch(verts: &[Vertex], index: u32) -> Result<Vertex> {
         .get(index as usize)
         .copied()
         .ok_or_else(|| Error::Geometry(format!("triangle index {index} out of range")))
+}
+
+/// Collects the unique undirected edges of a triangle-index list for wireframe drawing.
+///
+/// Each triangle contributes its three edges; an edge is keyed by its ordered `(min, max)` vertex
+/// index pair so an edge shared by two triangles (a quad's interior diagonal, or a seam between
+/// adjacent triangles that reuse vertices) is emitted only once. Edges are returned in first-seen
+/// order. A trailing partial triple (indices not a multiple of three) is ignored.
+fn dedup_edges(indices: &[u32]) -> Vec<(u32, u32)> {
+    let mut seen = HashSet::new();
+    let mut edges = Vec::new();
+    for tri in indices.chunks_exact(3) {
+        for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = if a <= b { (a, b) } else { (b, a) };
+            if seen.insert(key) {
+                edges.push(key);
+            }
+        }
+    }
+    edges
+}
+
+/// Clips a clip-space segment against the near plane (`clip.z >= 0`, matching
+/// [`clip_triangle_near`]), returning the visible portion or `None` if the whole segment is behind
+/// the plane. Keeping both surviving endpoints at `z >= 0` guarantees `w > 0`, so the subsequent
+/// perspective divide in [`project_clip`] never divides by zero.
+fn clip_segment_near(a: Vec4, b: Vec4) -> Option<(Vec4, Vec4)> {
+    let (za, zb) = (a.z, b.z);
+    match (za >= 0.0, zb >= 0.0) {
+        (false, false) => None,
+        (true, true) => Some((a, b)),
+        // Exactly one endpoint is behind; move it to the plane crossing. `za - zb` is non-zero
+        // because the endpoints straddle the plane.
+        (true, false) => {
+            let t = za / (za - zb);
+            Some((a, a.lerp(b, t)))
+        }
+        (false, true) => {
+            let t = za / (za - zb);
+            Some((a.lerp(b, t), b))
+        }
+    }
+}
+
+/// Applies the perspective divide and viewport transform to a clip-space point, returning rounded
+/// integer pixel coordinates. Returns `None` for a point on or behind the camera plane, or a
+/// non-finite projection, so callers can drop the segment.
+fn project_clip(clip: Vec4, width: usize, height: usize) -> Option<(i32, i32)> {
+    let w = clip.w;
+    if w <= 0.0 || !w.is_finite() {
+        return None;
+    }
+    let ndc = clip.xyz() / w;
+    let sx = (ndc.x * 0.5 + 0.5) * width as f32;
+    // Flip Y so +Y in NDC is up on screen (row 0 is the top).
+    let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * height as f32;
+    if !sx.is_finite() || !sy.is_finite() {
+        return None;
+    }
+    Some((sx.round() as i32, sy.round() as i32))
 }
 
 /// A vertex in homogeneous clip space, carrying the attributes interpolated during clipping.
@@ -858,6 +968,131 @@ mod tests {
         assert!(matches!(cam.projection, Projection::Orthographic { .. }));
         r.render(&cube_scene(), &cam, &mut fb).unwrap();
         assert!(!opaque_pixels(&fb).is_empty());
+    }
+
+    // --- Wireframe --------------------------------------------------------------------------------
+
+    #[test]
+    fn dedup_edges_drops_shared_diagonal() {
+        // A quad split into two triangles sharing the (0,2) diagonal: 6 directed edges collapse to
+        // 5 unique undirected edges.
+        let edges = dedup_edges(&[0, 1, 2, 0, 2, 3]);
+        assert_eq!(edges.len(), 5);
+        // The shared diagonal appears exactly once, canonicalized as (min, max).
+        assert_eq!(edges.iter().filter(|&&e| e == (0, 2)).count(), 1);
+    }
+
+    #[test]
+    fn dedup_edges_of_cube_recovers_expected_edge_count() {
+        // 8-corner cube = 12 box edges + one diagonal per quad face (6) = 18 unique edges.
+        let cube = crate::primitives::cube(1.0);
+        assert_eq!(dedup_edges(&cube.indices).len(), 18);
+    }
+
+    #[test]
+    fn dedup_edges_ignores_trailing_partial_triple() {
+        // Two full triangles plus two stray indices: the stray pair forms no triangle and is
+        // dropped by `chunks_exact(3)`.
+        let edges = dedup_edges(&[0, 1, 2, 0, 2, 3, 9, 9]);
+        assert_eq!(edges.len(), 5);
+    }
+
+    #[test]
+    fn wireframe_draws_edges_but_leaves_interior_empty() {
+        // A projected cube from a deterministic front camera: edges are drawn, but the enclosed
+        // region is not fully filled (that is what makes it a wireframe rather than a solid).
+        let mut fb = Framebuffer::new(24, 24);
+        let mut r = Rasterizer::new(ShadingMode::Wireframe);
+        r.base_color = Color::WHITE;
+        r.render(&cube_scene(), &front_camera(), &mut fb).unwrap();
+
+        let lit = opaque_pixels(&fb);
+        assert!(!lit.is_empty(), "wireframe must draw some edge pixels");
+
+        // Within the bounding box of the drawn pixels there must be at least one empty pixel: a
+        // solid fill would cover the whole box.
+        let min_x = lit.iter().map(|p| p.0).min().unwrap();
+        let max_x = lit.iter().map(|p| p.0).max().unwrap();
+        let min_y = lit.iter().map(|p| p.1).min().unwrap();
+        let max_y = lit.iter().map(|p| p.1).max().unwrap();
+        let mut empty_inside = 0usize;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if fb.get(x, y).a == 0.0 {
+                    empty_inside += 1;
+                }
+            }
+        }
+        assert!(
+            empty_inside > 0,
+            "a wireframe must leave interior pixels empty"
+        );
+
+        // A solid unlit render of the same scene covers strictly more pixels than the wireframe.
+        let mut solid = Framebuffer::new(24, 24);
+        let mut rs = Rasterizer::new(ShadingMode::Unlit);
+        rs.render(&cube_scene(), &front_camera(), &mut solid)
+            .unwrap();
+        assert!(
+            opaque_pixels(&solid).len() > lit.len(),
+            "solid fill must cover more pixels than the wireframe"
+        );
+    }
+
+    #[test]
+    fn wireframe_snapshot_is_deterministic() {
+        // The same scene and camera must produce an identical edge pixel set every time.
+        let render = || {
+            let mut fb = Framebuffer::new(20, 20);
+            let mut r = Rasterizer::new(ShadingMode::Wireframe);
+            r.render(&cube_scene(), &front_camera(), &mut fb).unwrap();
+            opaque_pixels(&fb)
+        };
+        assert_eq!(render(), render());
+    }
+
+    #[test]
+    fn wireframe_handles_empty_and_offscreen_targets() {
+        let mut r = Rasterizer::new(ShadingMode::Wireframe);
+
+        // Zero-sized target: no panic, no writes.
+        let mut empty = Framebuffer::new(0, 0);
+        r.render(&cube_scene(), &front_camera(), &mut empty)
+            .unwrap();
+
+        // Camera looking away: nothing drawn, no panic.
+        let mut fb = Framebuffer::new(16, 16);
+        let mut away = front_camera();
+        away.target = Vec3::new(0.0, 0.0, 50.0);
+        r.render(&cube_scene(), &away, &mut fb).unwrap();
+        assert!(opaque_pixels(&fb).is_empty());
+    }
+
+    #[test]
+    fn wireframe_out_of_range_index_errors_without_panicking() {
+        let mesh = Mesh::new(vec![Vertex::from_position(Vec3::ZERO)], vec![0, 1, 2]);
+        let scene = Scene::new("bad", vec![mesh]);
+        let mut fb = Framebuffer::new(8, 8);
+        let mut r = Rasterizer::new(ShadingMode::Wireframe);
+        let err = r.render(&scene, &front_camera(), &mut fb).unwrap_err();
+        assert!(matches!(err, Error::Geometry(_)));
+    }
+
+    #[test]
+    fn clip_segment_near_trims_and_rejects() {
+        // Fully behind the near plane -> rejected.
+        let behind_a = Vec4::new(0.0, 0.0, -1.0, 1.0);
+        let behind_b = Vec4::new(1.0, 0.0, -2.0, 1.0);
+        assert!(clip_segment_near(behind_a, behind_b).is_none());
+
+        // Straddling the plane -> the behind endpoint is moved onto z = 0.
+        let front = Vec4::new(0.0, 0.0, 1.0, 1.0);
+        let (a, b) = clip_segment_near(front, behind_a).unwrap();
+        assert_eq!(a, front, "the in-front endpoint is preserved");
+        assert!(
+            b.z.abs() < 1e-6,
+            "the clipped endpoint lands on the near plane"
+        );
     }
 
     // --- Lighting / shading -----------------------------------------------------------------------
