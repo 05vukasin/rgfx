@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest a new capability or improvement for rgfx.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Keep in mind rgfx is a renderer and
+        viewer, not an editor — see the Non-Goals in the README.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? What can't you do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature and how you imagine it working (CLI flags, behavior, output).
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the engine does this touch?
+      options:
+        - Core / framebuffer
+        - Terminal encoders (Braille / ASCII / blocks)
+        - Image pipeline
+        - 3D / rasterizer
+        - Video
+        - CLI / UX
+        - CI / packaging / docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative approaches or workarounds you have thought about.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, references, mockups, or related projects.
