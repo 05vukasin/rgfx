@@ -11,6 +11,7 @@
 //! - [`dispatch`] — the [`dispatch::MediaViewer`] trait plus the real still-image viewer and stub
 //!   viewers that report "not yet implemented" cleanly until the remaining viewers land.
 //! - [`image_viewer`] — the still-image viewer (task 021): decode → framebuffer → encode → present.
+//! - [`info`] — the non-interactive `info <FILE>` metadata report (aligned text or `--json`).
 //! - [`terminal`] — an interactive [`terminal::Session`] over `rgfx-terminal` that guarantees
 //!   terminal cleanup on every exit path.
 //! - [`app`] — the [`app::run`] entry point that loads config and dispatches.
@@ -26,6 +27,7 @@ pub mod cli;
 pub mod config;
 pub mod dispatch;
 pub mod image_viewer;
+pub mod info;
 pub mod media;
 pub mod terminal;
 
