@@ -20,7 +20,9 @@
 mod ascii;
 mod block;
 mod braille;
+mod color;
 mod event;
+mod serializer;
 mod terminal;
 mod writer;
 
@@ -32,8 +34,13 @@ pub use block::{
 pub use braille::{
     BRAILLE_BASE, BrailleEncoder, BrailleOptions, SUBPIXEL_X, SUBPIXEL_Y, braille_char,
 };
+pub use color::{
+    ANSI16_PALETTE, AnsiColor, ColorMode, ansi16_index, ansi256_index, detect_color_mode,
+    detect_from_env,
+};
 pub use event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, map_event,
 };
+pub use serializer::AnsiSerializer;
 pub use terminal::{Backend, CrosstermBackend, Terminal, TerminalOptions, install_panic_hook};
 pub use writer::BufferedWriter;
