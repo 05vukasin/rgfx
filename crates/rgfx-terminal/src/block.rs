@@ -26,6 +26,7 @@
 //! layer can attach them without reworking the sampling; the grayscale path here just discards them
 //! in favour of a glyph.
 
+use crate::color::ColorMode;
 use rgfx_core::{Cell, Color, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 
 /// Horizontal framebuffer pixels consumed per terminal cell (one).
@@ -66,6 +67,12 @@ pub struct BlockOptions {
     /// Minimum absolute top/bottom luminance difference that selects a half-block instead of a
     /// uniform shade. Defaults to `0.5`, so a two-tone (black/white) cell always splits.
     pub split_threshold: f32,
+    /// The color mode for cell colors. [`ColorMode::None`] (the default) keeps the grayscale
+    /// glyph-selection behavior described above. Any other mode switches to the color convention:
+    /// the cell always uses [`UPPER_HALF`] with the foreground set to the top pixel color and the
+    /// background to the bottom pixel color, giving independent color per vertical subpixel. Final
+    /// quantization to 16/256/truecolor happens downstream in the serializer.
+    pub color: ColorMode,
 }
 
 impl Default for BlockOptions {
@@ -74,6 +81,7 @@ impl Default for BlockOptions {
             invert: false,
             gamma: 1.0,
             split_threshold: 0.5,
+            color: ColorMode::None,
         }
     }
 }
@@ -151,10 +159,25 @@ impl BlockEncoder {
         }
     }
 
-    /// Encodes the 1×2 cell whose top pixel is `(px, py)` into one grayscale cell.
+    /// Encodes the 1×2 cell whose top pixel is `(px, py)` into one cell.
+    ///
+    /// In grayscale mode this selects a glyph from the top/bottom luminance. When
+    /// [`BlockOptions::color`] is not [`ColorMode::None`], it instead emits [`UPPER_HALF`] with the
+    /// top pixel as foreground and the bottom pixel as background, reusing [`sample_cell`] without
+    /// touching the sampling math.
+    ///
+    /// [`sample_cell`]: BlockEncoder::sample_cell
     fn encode_cell(&self, frame: &Framebuffer, px: usize, py: usize) -> Cell {
         let (top, bottom) = self.sample_cell(frame, px, py);
-        Cell::glyph(self.glyph_for_halves(top.luma(), bottom.luma()))
+        if self.options.color == ColorMode::None {
+            Cell::glyph(self.glyph_for_halves(top.luma(), bottom.luma()))
+        } else {
+            Cell {
+                ch: UPPER_HALF,
+                fg: Some(top),
+                bg: Some(bottom),
+            }
+        }
     }
 }
 
@@ -279,6 +302,31 @@ mod tests {
         for line in lines {
             assert_eq!(line.chars().count(), 6);
         }
+    }
+
+    #[test]
+    fn color_mode_none_leaves_cells_grayscale() {
+        let enc = BlockEncoder::new();
+        let cell = enc
+            .encode(&two_tone(1.0, 0.0), Viewport::new(1, 1))
+            .get(0, 0);
+        assert_eq!(cell.ch, UPPER_HALF);
+        assert_eq!((cell.fg, cell.bg), (None, None));
+    }
+
+    #[test]
+    fn color_mode_uses_upper_half_with_top_fg_and_bottom_bg() {
+        let mut fb = Framebuffer::new(1, 2);
+        fb.set(0, 0, Color::rgb(1.0, 0.0, 0.0));
+        fb.set(0, 1, Color::rgb(0.0, 0.0, 1.0));
+        let enc = BlockEncoder::with_options(BlockOptions {
+            color: ColorMode::TrueColor,
+            ..Default::default()
+        });
+        let cell = enc.encode(&fb, Viewport::new(1, 1)).get(0, 0);
+        assert_eq!(cell.ch, UPPER_HALF);
+        assert_eq!(cell.fg, Some(Color::rgb(1.0, 0.0, 0.0)));
+        assert_eq!(cell.bg, Some(Color::rgb(0.0, 0.0, 1.0)));
     }
 
     #[test]

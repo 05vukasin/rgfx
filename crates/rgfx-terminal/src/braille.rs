@@ -29,7 +29,8 @@
 //! enhancement are applied before the threshold test. [`BrailleOptions::invert`] flips the final
 //! lit/unlit decision.
 
-use rgfx_core::{Cell, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
+use crate::color::ColorMode;
+use rgfx_core::{Cell, Color, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 
 /// The base code point of the Braille Patterns Unicode block.
 pub const BRAILLE_BASE: u32 = 0x2800;
@@ -86,6 +87,11 @@ pub struct BrailleOptions {
     /// higher values add `strength * (luma - neighbourhood_mean)` to each subpixel, sharpening
     /// edges before the threshold test.
     pub edge_enhance: f32,
+    /// The color mode for cell foregrounds. [`ColorMode::None`] (the default) keeps pure grayscale
+    /// output — every cell carries only its glyph. Any other mode attaches a per-cell foreground:
+    /// the mean color of the block's lit subpixels. The final quantization to 16/256/truecolor is
+    /// performed downstream by the serializer, so the raw color is stored on the cell as-is.
+    pub color: ColorMode,
 }
 
 impl Default for BrailleOptions {
@@ -96,6 +102,7 @@ impl Default for BrailleOptions {
             gamma: 1.0,
             contrast: 1.0,
             edge_enhance: 0.0,
+            color: ColorMode::None,
         }
     }
 }
@@ -162,18 +169,33 @@ impl BrailleEncoder {
 
     /// Encodes the 2×4 block whose top-left framebuffer pixel is `(px, py)` into one cell.
     ///
-    /// Kept separate so a future color encoder (task 006) can compute a per-cell foreground from
-    /// the same block without reworking the dot math.
+    /// The dot math is unchanged from the grayscale path. When [`BrailleOptions::color`] is not
+    /// [`ColorMode::None`], the cell additionally carries a foreground: the mean color of the lit
+    /// subpixels in the block (a block with no lit dots keeps the terminal-default foreground).
     fn encode_cell(&self, frame: &Framebuffer, px: usize, py: usize) -> Cell {
         let mut mask = 0u8;
+        let mut sum = (0.0f32, 0.0f32, 0.0f32);
+        let mut lit_count = 0u32;
         for (dx, column) in DOT_MASK.iter().enumerate() {
             for (dy, &bit) in column.iter().enumerate() {
-                if self.is_lit(frame, px + dx, py + dy) {
+                let (x, y) = (px + dx, py + dy);
+                if self.is_lit(frame, x, y) {
                     mask |= bit;
+                    if self.options.color != ColorMode::None && frame.in_bounds(x, y) {
+                        let c = frame.get(x, y);
+                        sum = (sum.0 + c.r, sum.1 + c.g, sum.2 + c.b);
+                        lit_count += 1;
+                    }
                 }
             }
         }
-        Cell::glyph(braille_char(mask))
+        let ch = braille_char(mask);
+        if self.options.color == ColorMode::None || lit_count == 0 {
+            Cell::glyph(ch)
+        } else {
+            let n = lit_count as f32;
+            Cell::colored(ch, Color::rgb(sum.0 / n, sum.1 / n, sum.2 / n))
+        }
     }
 }
 
@@ -391,6 +413,44 @@ mod tests {
         let frame = enc.encode(&fb, Viewport::new(1, 1));
         // Only dot 1 (0x01) is in bounds and lit.
         assert_eq!(frame.get(0, 0).ch, braille_char(0x01));
+    }
+
+    #[test]
+    fn color_mode_none_leaves_cells_grayscale() {
+        let enc = BrailleEncoder::new();
+        let cell = enc.encode(&solid(2, 4, 1.0), Viewport::new(1, 1)).get(0, 0);
+        assert_eq!(cell.fg, None);
+        assert_eq!(cell.bg, None);
+    }
+
+    #[test]
+    fn color_mode_attaches_mean_of_lit_subpixels() {
+        // A 2×4 block: top row lit red, everything else black. Only the lit (red) pixels feed the
+        // mean, so the foreground is pure red regardless of the dark pixels.
+        let mut fb = solid(2, 4, 0.0);
+        fb.set(0, 0, Color::rgb(1.0, 0.0, 0.0));
+        fb.set(1, 0, Color::rgb(1.0, 0.0, 0.0));
+        // A low threshold so the red pixels (luma 0.299) count as lit.
+        let enc = BrailleEncoder::with_options(BrailleOptions {
+            threshold: 0.1,
+            color: ColorMode::TrueColor,
+            ..Default::default()
+        });
+        let cell = enc.encode(&fb, Viewport::new(1, 1)).get(0, 0);
+        assert_eq!(cell.fg, Some(Color::rgb(1.0, 0.0, 0.0)));
+        // Glyph math is untouched: dots 1 and 4 lit → mask 0x09.
+        assert_eq!(cell.ch, braille_char(0x09));
+    }
+
+    #[test]
+    fn color_mode_with_no_lit_dots_keeps_default_foreground() {
+        let enc = BrailleEncoder::with_options(BrailleOptions {
+            color: ColorMode::TrueColor,
+            ..Default::default()
+        });
+        let cell = enc.encode(&solid(2, 4, 0.0), Viewport::new(1, 1)).get(0, 0);
+        assert_eq!(cell.ch, '⠀');
+        assert_eq!(cell.fg, None);
     }
 
     #[test]

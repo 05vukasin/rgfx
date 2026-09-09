@@ -9,9 +9,14 @@
 //!
 //! # Feature flag
 //!
-//! The subprocess-driven entry points — [`probe`] and [`VideoSource`] — are
-//! gated behind the `ffmpeg` cargo feature. The crate's pure, dependency-free
-//! logic is always available and testable without ffmpeg installed:
+//! The subprocess-driven entry points — [`probe`], [`VideoSource`], and the
+//! playback-controlling [`Player`] — are gated behind the `ffmpeg` cargo
+//! feature. The crate's pure, dependency-free logic is always available and
+//! testable without ffmpeg installed:
+//!
+//! - [`Playback`] is the terminal-independent timing and state engine
+//!   (pause/resume, position, adaptive frame-skip decisions) that [`Player`]
+//!   drives; it is generic over a [`Clock`] so it can be tested with a mock.
 //!
 //! - [`VideoInfo::from_ffprobe_json`] parses `ffprobe`'s JSON report.
 //! - [`FrameReader`] chunks a raw `rgb24` byte stream into fixed-size frames.
@@ -30,7 +35,10 @@ mod convert;
 mod detect;
 mod frame;
 mod info;
+mod playback;
 
+#[cfg(feature = "ffmpeg")]
+mod player;
 #[cfg(feature = "ffmpeg")]
 mod source;
 
@@ -38,7 +46,10 @@ pub use convert::render_rgb24_into;
 pub use detect::{find_ffmpeg, find_ffprobe};
 pub use frame::FrameReader;
 pub use info::VideoInfo;
+pub use playback::{Clock, DEFAULT_MAX_SKIP, MonotonicClock, Playback, PlaybackStatus};
 
+#[cfg(feature = "ffmpeg")]
+pub use player::Player;
 #[cfg(feature = "ffmpeg")]
 pub use source::{VideoSource, probe};
 
