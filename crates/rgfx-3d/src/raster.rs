@@ -50,18 +50,35 @@ pub enum Cull {
 
 /// How the rasterizer colors each covered fragment.
 ///
-/// Lighting-based modes (flat and smooth shading) are added in a later task; this enum is
-/// deliberately marked non-exhaustive and its fragment stage kept simple so those variants slot
-/// in without reworking the pipeline.
+/// The lit modes ([`ShadingMode::Flat`] and [`ShadingMode::Smooth`]) apply an ambient +
+/// directional-diffuse (Lambert) term using the rasterizer's [`Rasterizer::light_direction`],
+/// [`Rasterizer::ambient`], and [`Rasterizer::base_color`]. Flat lights each triangle by its face
+/// normal (a hard-faceted look); smooth lights each fragment by the perspective-correct
+/// interpolation of the per-vertex normals (a rounded look). When a mesh supplies no per-vertex
+/// normals, both modes fall back to the triangle's geometric face normal.
+///
+/// This enum is marked non-exhaustive: new variants may be added without a breaking change, so
+/// external `match`es must include a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ShadingMode {
     /// Fill every fragment with the rasterizer's flat base color (no lighting).
     Unlit,
-    /// Visualize depth as grayscale: nearer fragments are brighter, farther ones darker.
-    Depth,
+    /// Lambert-shade each triangle by its single face normal (hard, faceted lighting).
+    Flat,
+    /// Lambert-shade each fragment by the perspective-correct interpolation of the per-vertex
+    /// normals (smooth, Gouraud-style lighting with no visible faceting on a dense mesh).
+    Smooth,
     /// Visualize the interpolated surface normal as an RGB color (`n * 0.5 + 0.5`).
     Normals,
+    /// Visualize depth as grayscale: nearer fragments are brighter, farther ones darker.
+    Depth,
+    /// Draw only the triangle edges.
+    ///
+    /// Line rasterization is implemented in a later task (012); until then this mode fills each
+    /// triangle solid with the base color so the mode is selectable, leaving a clear seam for the
+    /// edge pass to replace.
+    Wireframe,
 }
 
 /// A CPU software rasterizer that renders a [`Scene`] into a [`Framebuffer`].
@@ -77,10 +94,19 @@ pub struct Rasterizer {
     pub front_face: FrontFace,
     /// Which faces to discard.
     pub cull: Cull,
-    /// The flat color used by [`ShadingMode::Unlit`] and as the clear color's opaque base.
+    /// The surface color lit by the shading modes, and the flat color used by
+    /// [`ShadingMode::Unlit`].
     pub base_color: Color,
     /// The color the framebuffer is cleared to before rendering.
     pub clear_color: Color,
+    /// World-space direction *toward* the directional light. The diffuse term is
+    /// `max(0, dot(normal, light_direction))`, so surfaces whose normal points along this
+    /// direction are brightest. Need not be a unit vector — it is normalized when shading. Used by
+    /// [`ShadingMode::Flat`] and [`ShadingMode::Smooth`].
+    pub light_direction: Vec3,
+    /// Ambient light level in `0.0..=1.0`, added to the diffuse term before clamping. Acts as a
+    /// floor so faces turned away from the light are never fully black.
+    pub ambient: f32,
 }
 
 impl Default for Rasterizer {
@@ -91,7 +117,8 @@ impl Default for Rasterizer {
 
 impl Rasterizer {
     /// Creates a rasterizer with the given shading mode and sensible defaults: counter-clockwise
-    /// front faces, back-face culling, an opaque-white base color, and a transparent clear color.
+    /// front faces, back-face culling, an opaque-white base color, a transparent clear color, a
+    /// directional light coming from the upper-front-right, and a low ambient floor.
     pub fn new(shading: ShadingMode) -> Self {
         Self {
             shading,
@@ -99,6 +126,17 @@ impl Rasterizer {
             cull: Cull::Back,
             base_color: Color::WHITE,
             clear_color: Color::TRANSPARENT,
+            light_direction: Vec3::new(0.5, 0.7, 1.0).normalize(),
+            ambient: 0.15,
+        }
+    }
+
+    /// Sets the directional light direction, normalizing it. A zero vector is ignored so the
+    /// existing direction is kept (shading never divides by a zero-length light).
+    pub fn set_light_direction(&mut self, direction: Vec3) {
+        let n = direction.normalize_or_zero();
+        if n != Vec3::ZERO {
+            self.light_direction = n;
         }
     }
 
@@ -216,19 +254,63 @@ impl Rasterizer {
     /// Computes the fragment color for the current shading mode.
     fn shade(&self, v: &[ScreenVertex; 3], bary: (f32, f32, f32), frag_depth: f32) -> Color {
         match self.shading {
-            ShadingMode::Unlit => {
-                Color::new(self.base_color.r, self.base_color.g, self.base_color.b, 1.0)
+            ShadingMode::Unlit => self.base_opaque(),
+            ShadingMode::Flat => {
+                // One face normal shared by all three vertices: hard-faceted lighting.
+                let intensity = lambert(v[0].face_normal, self.light_direction, self.ambient);
+                self.lit_color(intensity)
             }
-            ShadingMode::Depth => {
-                let g = (1.0 - frag_depth).clamp(0.0, 1.0);
-                Color::rgb(g, g, g)
+            ShadingMode::Smooth => {
+                let n = perspective_normal(v, bary);
+                let intensity = lambert(n, self.light_direction, self.ambient);
+                self.lit_color(intensity)
             }
             ShadingMode::Normals => {
                 let n = perspective_normal(v, bary);
                 Color::rgb(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5)
             }
+            ShadingMode::Depth => {
+                let g = (1.0 - frag_depth).clamp(0.0, 1.0);
+                Color::rgb(g, g, g)
+            }
+            // SEAM (task 012): wireframe replaces this solid fill with edge-only line
+            // rasterization. Until then the mode is selectable and paints the base color.
+            ShadingMode::Wireframe => self.base_opaque(),
         }
     }
+
+    /// The opaque base color (alpha forced to 1.0), used by the unlit and placeholder modes.
+    fn base_opaque(&self) -> Color {
+        Color::rgb(self.base_color.r, self.base_color.g, self.base_color.b)
+    }
+
+    /// The base color scaled by a diffuse `intensity` in `0.0..=1.0`, kept opaque.
+    fn lit_color(&self, intensity: f32) -> Color {
+        Color::rgb(
+            self.base_color.r * intensity,
+            self.base_color.g * intensity,
+            self.base_color.b * intensity,
+        )
+    }
+}
+
+/// The Lambert diffuse intensity for a surface `normal` lit by a directional light shining from
+/// `light_direction`, with an `ambient` floor: `clamp(ambient + max(0, dot(n, l)), 0, 1)`.
+///
+/// Both vectors are normalized defensively, so a zero-length or unnormalized input yields a
+/// finite result (the ambient level for a zero vector) rather than a NaN.
+fn lambert(normal: Vec3, light_direction: Vec3, ambient: f32) -> f32 {
+    let n = normal.normalize_or_zero();
+    let l = light_direction.normalize_or_zero();
+    let diffuse = n.dot(l).max(0.0);
+    (ambient + diffuse).clamp(0.0, 1.0)
+}
+
+/// The geometric (face) normal of triangle `(a, b, c)` via the right-hand rule on its winding,
+/// or `Vec3::ZERO` for a degenerate triangle. Used for flat shading and as the fallback normal
+/// when a mesh supplies no per-vertex normals.
+fn geometric_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    (b - a).cross(c - a).normalize_or_zero()
 }
 
 impl SceneRenderer for Rasterizer {
@@ -241,10 +323,18 @@ impl SceneRenderer for Rasterizer {
                 let a = fetch(verts, tri[0])?;
                 let b = fetch(verts, tri[1])?;
                 let c = fetch(verts, tri[2])?;
+                // Face normal from geometry (world space; mesh transforms are baked into
+                // positions). Flip it for a clockwise front-face convention so it points toward
+                // the front of the surface, and reuse it as the fallback per-vertex normal for
+                // meshes that ship without normals.
+                let mut face_normal = geometric_normal(a.position, b.position, c.position);
+                if self.front_face == FrontFace::Clockwise {
+                    face_normal = -face_normal;
+                }
                 let clip = [
-                    ClipVertex::new(view_proj, a),
-                    ClipVertex::new(view_proj, b),
-                    ClipVertex::new(view_proj, c),
+                    ClipVertex::new(view_proj, a, face_normal),
+                    ClipVertex::new(view_proj, b, face_normal),
+                    ClipVertex::new(view_proj, c, face_normal),
                 ];
                 self.draw_clip_triangle(clip, target);
             }
@@ -266,14 +356,27 @@ fn fetch(verts: &[Vertex], index: u32) -> Result<Vertex> {
 #[derive(Clone, Copy, Debug, Default)]
 struct ClipVertex {
     clip: Vec4,
+    /// The per-vertex shading normal (world space), used for smooth shading and the normals debug
+    /// mode. Falls back to the triangle's face normal when the source vertex has none.
     normal: Vec3,
+    /// The triangle's face normal (world space), constant across the triangle, used by flat
+    /// shading. Interpolation during clipping preserves it since all three vertices share it.
+    face_normal: Vec3,
 }
 
 impl ClipVertex {
-    fn new(view_proj: Mat4, v: Vertex) -> Self {
+    fn new(view_proj: Mat4, v: Vertex, face_normal: Vec3) -> Self {
+        // Use the supplied per-vertex normal when present, otherwise generate one from geometry by
+        // adopting the triangle's face normal (so meshes without normals still shade).
+        let normal = if v.normal.length_squared() > 1e-12 {
+            v.normal.normalize()
+        } else {
+            face_normal
+        };
         Self {
             clip: view_proj * v.position.extend(1.0),
-            normal: v.normal,
+            normal,
+            face_normal,
         }
     }
 
@@ -283,6 +386,7 @@ impl ClipVertex {
         Self {
             clip: self.clip.lerp(other.clip, t),
             normal: self.normal.lerp(other.normal, t),
+            face_normal: self.face_normal.lerp(other.face_normal, t),
         }
     }
 }
@@ -299,6 +403,8 @@ struct ScreenVertex {
     /// World-space normal scaled by `inv_w` (so a plain barycentric sum recovers the
     /// perspective-correct value after multiplying by the interpolated `w`).
     normal_over_w: Vec3,
+    /// The triangle's face normal (world space), constant across the triangle, for flat shading.
+    face_normal: Vec3,
 }
 
 /// Clips a triangle against the near plane (`z_clip >= 0`) using Sutherland–Hodgman, returning the
@@ -346,6 +452,7 @@ fn project(v: &ClipVertex, width: usize, height: usize) -> Option<ScreenVertex> 
         depth: ndc.z,
         inv_w,
         normal_over_w: v.normal * inv_w,
+        face_normal: v.face_normal,
     };
     if sv.pos.is_finite() && sv.depth.is_finite() {
         Some(sv)
@@ -406,6 +513,19 @@ mod tests {
             depth,
             inv_w: 1.0,
             normal_over_w: Vec3::Z,
+            face_normal: Vec3::Z,
+        }
+    }
+
+    /// Builds a screen-space vertex with explicit shading normals (position/depth irrelevant to
+    /// the shading tests).
+    fn sv_shaded(vertex_normal: Vec3, face_normal: Vec3) -> ScreenVertex {
+        ScreenVertex {
+            pos: Vec2::ZERO,
+            depth: 0.5,
+            inv_w: 1.0,
+            normal_over_w: vertex_normal,
+            face_normal,
         }
     }
 
@@ -551,6 +671,7 @@ mod tests {
         let behind = ClipVertex {
             clip: Vec4::new(0.0, 0.0, -1.0, 1.0),
             normal: Vec3::Z,
+            face_normal: Vec3::Z,
         };
         let (_, n) = clip_triangle_near(&[behind, behind, behind]);
         assert_eq!(n, 0, "a triangle fully behind the near plane is removed");
@@ -562,14 +683,17 @@ mod tests {
         let front_a = ClipVertex {
             clip: Vec4::new(-1.0, -1.0, 1.0, 1.0),
             normal: Vec3::Z,
+            face_normal: Vec3::Z,
         };
         let front_b = ClipVertex {
             clip: Vec4::new(1.0, -1.0, 1.0, 1.0),
             normal: Vec3::Z,
+            face_normal: Vec3::Z,
         };
         let behind = ClipVertex {
             clip: Vec4::new(0.0, 1.0, -1.0, 1.0),
             normal: Vec3::Z,
+            face_normal: Vec3::Z,
         };
         let (poly, n) = clip_triangle_near(&[front_a, front_b, behind]);
         assert_eq!(n, 4);
@@ -734,5 +858,156 @@ mod tests {
         assert!(matches!(cam.projection, Projection::Orthographic { .. }));
         r.render(&cube_scene(), &cam, &mut fb).unwrap();
         assert!(!opaque_pixels(&fb).is_empty());
+    }
+
+    // --- Lighting / shading -----------------------------------------------------------------------
+
+    const THIRD: (f32, f32, f32) = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
+
+    #[test]
+    fn lambert_matches_known_normal_light_pairs() {
+        // Facing the light head-on with no ambient => full intensity.
+        assert!((lambert(Vec3::Z, Vec3::Z, 0.0) - 1.0).abs() < 1e-6);
+        // Perpendicular to the light => diffuse is zero, only ambient remains.
+        assert!(lambert(Vec3::X, Vec3::Z, 0.0).abs() < 1e-6);
+        // Turned away => the negative dot clamps to zero, leaving the ambient floor.
+        assert!((lambert(-Vec3::Z, Vec3::Z, 0.2) - 0.2).abs() < 1e-6);
+        // 45° between normal and light => cos(45°) diffuse.
+        let n = Vec3::new(1.0, 0.0, 1.0).normalize();
+        assert!((lambert(n, Vec3::Z, 0.0) - n.dot(Vec3::Z)).abs() < 1e-6);
+        // Ambient plus full diffuse saturates at 1.0 (clamped, never above).
+        assert!((lambert(Vec3::Z, Vec3::Z, 0.5) - 1.0).abs() < 1e-6);
+        // Light direction need not be normalized: only its direction matters.
+        assert!((lambert(Vec3::Z, Vec3::Z * 7.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flat_light_facing_face_brighter_than_away_with_ambient_floor() {
+        let mut r = Rasterizer::new(ShadingMode::Flat);
+        r.base_color = Color::WHITE;
+        r.ambient = 0.1;
+        r.light_direction = Vec3::Z;
+
+        let toward = [sv_shaded(Vec3::Z, Vec3::Z); 3];
+        let away = [sv_shaded(Vec3::NEG_Z, Vec3::NEG_Z); 3];
+        let lit = r.shade(&toward, THIRD, 0.5);
+        let dark = r.shade(&away, THIRD, 0.5);
+
+        assert!(
+            lit.luma() > dark.luma(),
+            "face toward the light must be brighter"
+        );
+        assert!(
+            dark.luma() > 0.0,
+            "ambient floor must prevent a fully-black visible face"
+        );
+        assert!(
+            (dark.luma() - 0.1).abs() < 1e-6,
+            "away face lit only by ambient"
+        );
+        // Lit fragments are always opaque so they compose into the framebuffer.
+        assert_eq!(lit.a, 1.0);
+    }
+
+    #[test]
+    fn flat_and_smooth_differ_on_quad_with_differing_vertex_normals() {
+        // A triangle carrying three different vertex normals but a single face normal. Flat uses
+        // the constant face normal; smooth interpolates the per-vertex normals, so at an interior
+        // point the two intensities differ.
+        let face = Vec3::Z;
+        let verts = [
+            sv_shaded(Vec3::X, face),
+            sv_shaded(Vec3::Y, face),
+            sv_shaded(Vec3::Z, face),
+        ];
+
+        let mut flat = Rasterizer::new(ShadingMode::Flat);
+        flat.base_color = Color::WHITE;
+        flat.ambient = 0.0;
+        flat.light_direction = Vec3::Z;
+        let mut smooth = flat;
+        smooth.shading = ShadingMode::Smooth;
+
+        let c_flat = flat.shade(&verts, THIRD, 0.5);
+        let c_smooth = smooth.shade(&verts, THIRD, 0.5);
+
+        // Flat: dot(face=Z, Z) = 1 => full white. Smooth: normalize(1,1,1)·Z ≈ 0.577.
+        assert!((c_flat.luma() - 1.0).abs() < 1e-4);
+        assert!(
+            (c_flat.luma() - c_smooth.luma()).abs() > 1e-2,
+            "flat and smooth must produce different shading on differing vertex normals"
+        );
+    }
+
+    #[test]
+    fn normals_and_depth_modes_map_deterministically() {
+        let verts = [sv_shaded(Vec3::Z, Vec3::Z); 3];
+
+        // Normals: n * 0.5 + 0.5, so +Z encodes (0.5, 0.5, 1.0).
+        let n = Rasterizer::new(ShadingMode::Normals).shade(&verts, THIRD, 0.5);
+        assert!((n.r - 0.5).abs() < 1e-6 && (n.g - 0.5).abs() < 1e-6 && (n.b - 1.0).abs() < 1e-6);
+
+        // Depth: grayscale = 1 - depth (nearer is brighter), equal across channels.
+        let d = Rasterizer::new(ShadingMode::Depth).shade(&verts, THIRD, 0.25);
+        assert!((d.r - 0.75).abs() < 1e-6);
+        assert_eq!(d.r, d.g);
+        assert_eq!(d.g, d.b);
+    }
+
+    #[test]
+    fn flat_generates_face_normal_when_mesh_lacks_normals() {
+        // A triangle in the z = 0 plane, wound CCW as seen from +Z, with no vertex normals. Flat
+        // shading must synthesize a +Z face normal from geometry and catch the +Z light.
+        let mesh = Mesh::new(
+            vec![
+                Vertex::from_position(Vec3::new(-1.0, -1.0, 0.0)),
+                Vertex::from_position(Vec3::new(1.0, -1.0, 0.0)),
+                Vertex::from_position(Vec3::new(0.0, 1.0, 0.0)),
+            ],
+            vec![0, 1, 2],
+        );
+        let scene = Scene::new("tri", vec![mesh]);
+
+        let mut fb = Framebuffer::new(16, 16);
+        let mut r = Rasterizer::new(ShadingMode::Flat);
+        r.cull = Cull::None;
+        r.base_color = Color::WHITE;
+        r.ambient = 0.1;
+        r.light_direction = Vec3::Z;
+        r.render(&scene, &front_camera(), &mut fb).unwrap();
+
+        let max_luma = (0..fb.height())
+            .flat_map(|y| (0..fb.width()).map(move |x| (x, y)))
+            .map(|(x, y)| fb.get(x, y))
+            .filter(|c| c.a > 0.0)
+            .map(|c| c.luma())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_luma > 0.1 + 1e-3,
+            "a generated face normal facing the light must shade brighter than ambient, got {max_luma}"
+        );
+    }
+
+    #[test]
+    fn smooth_interpolates_intensity_across_a_face() {
+        // A single triangle whose vertex normals fan from +X to +Y to +Z. Under a +Z light the
+        // per-fragment intensity must vary across the face (no single flat value).
+        let normals = [Vec3::X, Vec3::Y, Vec3::Z];
+        let verts = [
+            sv_shaded(normals[0], Vec3::Z),
+            sv_shaded(normals[1], Vec3::Z),
+            sv_shaded(normals[2], Vec3::Z),
+        ];
+        let mut r = Rasterizer::new(ShadingMode::Smooth);
+        r.base_color = Color::WHITE;
+        r.ambient = 0.0;
+        r.light_direction = Vec3::Z;
+
+        // At the vertex weighted fully toward +Z, intensity is 1; toward +X it is ~0.
+        let at_z = r.shade(&verts, (0.0, 0.0, 1.0), 0.5);
+        let at_x = r.shade(&verts, (1.0, 0.0, 0.0), 0.5);
+        assert!((at_z.luma() - 1.0).abs() < 1e-4);
+        assert!(at_x.luma() < 1e-4);
+        assert!(at_z.luma() > at_x.luma());
     }
 }
