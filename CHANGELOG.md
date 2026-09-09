@@ -21,5 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHA256SUMS` on tagged releases.
 - Issue and pull-request templates and Dependabot configuration for Cargo and
   GitHub Actions.
+- One-line `install.sh` that detects OS/architecture, resolves the latest
+  release, downloads the matching `rgfx-linux-<arch>.tar.gz`, verifies its
+  SHA-256 against `SHA256SUMS`, installs to `~/.local/bin`, and prints PATH
+  guidance.
+- AUR packaging templates under `packaging/aur/` for `rgfx` (source build),
+  `rgfx-bin` (prebuilt binary), and `rgfx-git` (VCS), plus a packaging README.
+- crates.io publishing metadata (`keywords`, `categories`, `readme`, and a
+  shared `homepage`) on every publishable crate; `rgfx-bench` is marked
+  `publish = false`.
+- Install documentation in `README.md` for the one-line installer and the AUR
+  packages.
 
 [Unreleased]: https://github.com/05vukasin/rgfx/commits/main

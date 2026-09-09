@@ -8,7 +8,9 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/05vukasin/rgfx"
+homepage = "https://github.com/05vukasin/rgfx"
 authors = ["The rgfx authors"]
+readme = "README.md"
 
 # Shared dependency versions. Member crates opt in with `<dep>.workspace = true`.
 # Do not change a version here without flagging it — other crates' branches depend on it.

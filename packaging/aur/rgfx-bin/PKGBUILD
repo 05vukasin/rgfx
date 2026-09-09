@@ -1,0 +1,26 @@
+# Maintainer: The rgfx authors <noreply@example.com>
+#
+# rgfx-bin — prebuilt release binary from the GitHub Releases page.
+# Replace the 'SKIP' checksums with the values from the release SHA256SUMS
+# (or run `updpkgsums`) before submitting to the AUR.
+
+pkgname=rgfx-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Universal terminal graphics engine (prebuilt binary): images, video, animation, and 3D previews"
+arch=('x86_64' 'aarch64')
+url="https://github.com/05vukasin/rgfx"
+license=('MIT OR Apache-2.0')
+depends=('gcc-libs')
+optdepends=('ffmpeg: video decoding and playback')
+provides=('rgfx')
+conflicts=('rgfx')
+source_x86_64=("rgfx-linux-x86_64-$pkgver.tar.gz::https://github.com/05vukasin/rgfx/releases/download/v$pkgver/rgfx-linux-x86_64.tar.gz")
+source_aarch64=("rgfx-linux-aarch64-$pkgver.tar.gz::https://github.com/05vukasin/rgfx/releases/download/v$pkgver/rgfx-linux-aarch64.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    # The release archive contains only the `rgfx` binary.
+    install -Dm755 rgfx "$pkgdir/usr/bin/rgfx"
+}
