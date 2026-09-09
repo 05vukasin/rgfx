@@ -27,6 +27,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rgfx-3d"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "rgfx-core",
+]
+
+[[package]]
 name = "rgfx-core"
 version = "0.1.0"
 dependencies = [
