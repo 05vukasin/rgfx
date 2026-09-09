@@ -89,6 +89,14 @@ pub struct RenderOpts {
     #[arg(long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
+    /// Open the live full-screen viewer instead of printing inline.
+    ///
+    /// By default a still image is printed inline at the current terminal size and control
+    /// returns to the shell. `--interactive` enters the alternate screen and re-renders on
+    /// resize until you press `q`/`Esc`. (Animated and 3D inputs are always interactive.)
+    #[arg(long)]
+    pub interactive: bool,
+
     /// Read a raw frame stream from standard input and render it continuously.
     ///
     /// Instead of a single file, stdin is treated as a minimal framed protocol: one ASCII header

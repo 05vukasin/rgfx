@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Still images now render **inline** at the terminal size and return to the shell by default; the full-screen viewer moved behind `--interactive`. `--output`/inline width now follows the real terminal instead of a fixed 80 columns. (#030)
+
 ### Added
 
 - Cargo workspace scaffolding and the `rgfx-core` crate (framebuffer, color,

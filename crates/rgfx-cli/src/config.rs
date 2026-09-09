@@ -180,6 +180,8 @@ pub struct Settings {
     pub threshold: f32,
     /// Optional output-file sink instead of the live terminal.
     pub output: Option<PathBuf>,
+    /// Open the live full-screen viewer for still images instead of printing inline.
+    pub interactive: bool,
 }
 
 impl Settings {
@@ -204,6 +206,7 @@ impl Settings {
             contrast: opts.contrast.unwrap_or(config.image.contrast),
             threshold: config.image.threshold,
             output: opts.output.clone(),
+            interactive: opts.interactive,
         }
     }
 }

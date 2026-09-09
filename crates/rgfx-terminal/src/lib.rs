@@ -49,5 +49,7 @@ pub use event::{
 };
 pub use frame_engine::FrameEngine;
 pub use serializer::AnsiSerializer;
-pub use terminal::{Backend, CrosstermBackend, Terminal, TerminalOptions, install_panic_hook};
+pub use terminal::{
+    Backend, CrosstermBackend, Terminal, TerminalOptions, install_panic_hook, terminal_size,
+};
 pub use writer::BufferedWriter;
