@@ -3,9 +3,9 @@
 //! This crate owns everything that talks to the real terminal: enabling raw mode, switching to
 //! the alternate screen, hiding the cursor, optionally capturing the mouse, reading input, and —
 //! most importantly — **restoring every one of those on every exit path**, including normal
-//! return, an error, `Ctrl+C`, or a panic. The encoders (Braille/ASCII/blocks), color handling,
-//! and the frame-diff engine are separate crates that build on top of what is exposed here; this
-//! crate deliberately knows nothing about them.
+//! return, an error, `Ctrl+C`, or a panic. The encoders (Braille/ASCII/blocks) live in this same
+//! crate as separate modules; color handling and the frame-diff engine build on top of what is
+//! exposed here.
 //!
 //! The three public building blocks are:
 //! - [`Terminal`] — the RAII lifecycle guard. Construct it to enter graphics mode; drop it (or let
@@ -17,11 +17,18 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod ascii;
+mod block;
 mod braille;
 mod event;
 mod terminal;
 mod writer;
 
+pub use ascii::{AsciiEncoder, AsciiOptions, DEFAULT_RAMP};
+pub use block::{
+    BlockEncoder, BlockOptions, DARK_SHADE, FULL_BLOCK, LEFT_HALF, LIGHT_SHADE, LOWER_HALF,
+    MEDIUM_SHADE, RIGHT_HALF, SHADE_RAMP, UPPER_HALF,
+};
 pub use braille::{
     BRAILLE_BASE, BrailleEncoder, BrailleOptions, SUBPIXEL_X, SUBPIXEL_Y, braille_char,
 };
