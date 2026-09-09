@@ -13,7 +13,8 @@
 //! the first (darkest) glyph and `1.0` the last (lightest). The mapping is monotonic, so a smooth
 //! luminance gradient produces a non-decreasing sequence of ramp glyphs.
 
-use rgfx_core::{Cell, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
+use crate::color::ColorMode;
+use rgfx_core::{Cell, Color, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 
 /// The default dark→light density ramp, `" .:-=+*#%@"`.
 pub const DEFAULT_RAMP: &str = " .:-=+*#%@";
@@ -41,6 +42,10 @@ pub struct AsciiOptions {
     /// Gamma exponent applied as `luma.powf(gamma)`. `1.0` is identity; values below `1.0` brighten
     /// mid-tones, values above darken them. Defaults to `1.0`.
     pub gamma: f32,
+    /// The color mode for cell foregrounds. [`ColorMode::None`] (the default) keeps pure grayscale
+    /// output. Any other mode attaches the sampled pixel color as the cell foreground while the
+    /// glyph is still chosen by luminance. Final quantization happens downstream in the serializer.
+    pub color: ColorMode,
 }
 
 impl Default for AsciiOptions {
@@ -49,6 +54,7 @@ impl Default for AsciiOptions {
             ramp: DEFAULT_RAMP.to_string(),
             invert: false,
             gamma: 1.0,
+            color: ColorMode::None,
         }
     }
 }
@@ -111,15 +117,19 @@ impl AsciiEncoder {
 
     /// Encodes the single framebuffer pixel `(px, py)` into one cell.
     ///
-    /// Out-of-bounds pixels are treated as fully dark. Kept separate so alternative sampling (block
-    /// averaging) or a color layer can reuse the glyph selection without reworking the loop.
+    /// Out-of-bounds pixels are treated as fully dark. The glyph is always chosen by luminance;
+    /// when [`AsciiOptions::color`] is not [`ColorMode::None`] the sampled pixel color is attached
+    /// as the cell foreground (out-of-bounds pixels keep the terminal-default foreground).
     fn encode_cell(&self, frame: &Framebuffer, px: usize, py: usize) -> Cell {
-        let luma = if frame.in_bounds(px, py) {
-            frame.luma(px, py)
+        let in_bounds = frame.in_bounds(px, py);
+        let luma = if in_bounds { frame.luma(px, py) } else { 0.0 };
+        let ch = self.glyph_for_luma(luma);
+        if self.options.color == ColorMode::None || !in_bounds {
+            Cell::glyph(ch)
         } else {
-            0.0
-        };
-        Cell::glyph(self.glyph_for_luma(luma))
+            let c = frame.get(px, py);
+            Cell::colored(ch, Color::rgb(c.r, c.g, c.b))
+        }
     }
 }
 
@@ -273,6 +283,44 @@ mod tests {
         }
         let enc = AsciiEncoder::new();
         assert_eq!(enc.encode(&fb, vp).to_text(), DEFAULT_RAMP);
+    }
+
+    #[test]
+    fn color_mode_none_leaves_cells_grayscale() {
+        let enc = AsciiEncoder::new();
+        let mut fb = Framebuffer::new(1, 1);
+        fb.set(0, 0, Color::rgb(1.0, 0.0, 0.0));
+        let cell = enc.encode(&fb, Viewport::new(1, 1)).get(0, 0);
+        assert_eq!(cell.fg, None);
+    }
+
+    #[test]
+    fn color_mode_attaches_sampled_pixel_color() {
+        let mut fb = Framebuffer::new(1, 1);
+        fb.set(0, 0, Color::rgb(0.25, 0.5, 0.75));
+        let enc = AsciiEncoder::with_options(AsciiOptions {
+            color: ColorMode::Ansi256,
+            ..Default::default()
+        });
+        let cell = enc.encode(&fb, Viewport::new(1, 1)).get(0, 0);
+        assert_eq!(cell.fg, Some(Color::rgb(0.25, 0.5, 0.75)));
+        // Glyph is still chosen by luma, exactly as the grayscale path.
+        assert_eq!(
+            cell.ch,
+            enc.glyph_for_luma(Color::rgb(0.25, 0.5, 0.75).luma())
+        );
+    }
+
+    #[test]
+    fn color_mode_out_of_bounds_keeps_default_foreground() {
+        let enc = AsciiEncoder::with_options(AsciiOptions {
+            color: ColorMode::TrueColor,
+            ..Default::default()
+        });
+        let fb = Framebuffer::new(1, 1);
+        // Cell (2,0) is out of bounds → dark glyph, no color.
+        let cell = enc.encode(&fb, Viewport::new(3, 1)).get(2, 0);
+        assert_eq!(cell.fg, None);
     }
 
     #[test]
