@@ -1,0 +1,27 @@
+[package]
+name = "rgfx-video"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Video frame decoding into the rgfx framebuffer pipeline by shelling out to ffmpeg/ffprobe"
+
+[dependencies]
+rgfx-core = { path = "../rgfx-core" }
+rgfx-image = { path = "../rgfx-image" }
+image.workspace = true
+serde = { workspace = true }
+serde_json = "1"
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+# The `ffmpeg` feature enables the subprocess-driven decoding entry points
+# (`probe` and `VideoSource`). It links nothing: the `ffmpeg`/`ffprobe`
+# executables are located and invoked at runtime. Building without this feature
+# keeps `cargo build --workspace` free of any ffmpeg requirement while still
+# compiling and testing the crate's pure logic (JSON parsing, frame chunking,
+# and RGB → framebuffer conversion).
+default = []
+ffmpeg = []
