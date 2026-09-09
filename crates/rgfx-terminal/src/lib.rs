@@ -17,10 +17,14 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod braille;
 mod event;
 mod terminal;
 mod writer;
 
+pub use braille::{
+    BRAILLE_BASE, BrailleEncoder, BrailleOptions, SUBPIXEL_X, SUBPIXEL_Y, braille_char,
+};
 pub use event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind, map_event,
 };
