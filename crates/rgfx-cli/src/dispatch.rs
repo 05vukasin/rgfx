@@ -66,18 +66,18 @@ impl MediaViewer for VideoViewer {
     }
 }
 
-/// Stub 3D-mesh viewer (task 023).
+/// The interactive 3D-mesh viewer (task 022).
 #[derive(Debug)]
 pub struct MeshViewer {
-    /// The concrete mesh format, so a real viewer can pick the right loader.
+    /// The concrete mesh format, so the viewer can pick the right loader.
     pub format: MeshFormat,
 }
 impl MediaViewer for MeshViewer {
     fn name(&self) -> &'static str {
         "mesh"
     }
-    fn view(&mut self, _request: &ViewRequest<'_>) -> anyhow::Result<()> {
-        Err(not_yet_implemented("3D mesh", "023"))
+    fn view(&mut self, request: &ViewRequest<'_>) -> anyhow::Result<()> {
+        crate::mesh_viewer::view(request, self.format)
     }
 }
 
@@ -133,20 +133,25 @@ mod tests {
 
     #[test]
     fn stubs_report_not_implemented_without_panicking() {
-        // The image viewer is real now (task 021); the remaining families are still stubs.
+        // The image viewer (021) and mesh viewer (022) are real now; GIF and video remain stubs.
         let input = Input::parse("x.dat");
         let settings = resolved_settings();
-        for kind in [
-            MediaKind::Gif,
-            MediaKind::Video,
-            MediaKind::Mesh(MeshFormat::Gltf),
-        ] {
+        for kind in [MediaKind::Gif, MediaKind::Video] {
             let err = dispatch(&input, kind, &settings).unwrap_err();
             assert!(
                 err.to_string().contains("not yet implemented"),
                 "unexpected message: {err}"
             );
         }
+    }
+
+    #[test]
+    fn mesh_viewer_missing_file_is_clean_error() {
+        // The mesh viewer is real (022): a missing file errors cleanly, never "not yet implemented".
+        let input = Input::parse("does-not-exist.obj");
+        let settings = resolved_settings();
+        let err = dispatch(&input, MediaKind::Mesh(MeshFormat::Obj), &settings).unwrap_err();
+        assert!(err.to_string().contains("loading OBJ"), "got: {err}");
     }
 
     #[test]
