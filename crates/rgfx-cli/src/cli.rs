@@ -88,6 +88,17 @@ pub struct RenderOpts {
     /// Write the encoded output to a file instead of the live terminal.
     #[arg(long, value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    /// Read a raw frame stream from standard input and render it continuously.
+    ///
+    /// Instead of a single file, stdin is treated as a minimal framed protocol: one ASCII header
+    /// line `WIDTHxHEIGHT` (e.g. `320x240`) followed by consecutive raw RGB24 frames, each
+    /// `WIDTH*HEIGHT*3` bytes (8-bit R,G,B, row-major, top-to-bottom), back to back with no
+    /// delimiter. Frames are resampled to fit the terminal and paced by `--fps`. Playback ends
+    /// cleanly at end-of-input; a producer closing the pipe mid-frame stops playback without a
+    /// hang or panic. Example: `my_generator | rgfx --stream`.
+    #[arg(long)]
+    pub stream: bool,
 }
 
 /// Dithering algorithm selection for the image-quality stage.
