@@ -10,8 +10,9 @@
 //! [`rgfx_core::SceneRenderer`], running the full transform → near-clip → project → cull →
 //! barycentric-fill → depth-test → shade pipeline. Its [`ShadingMode`] covers unlit, flat and
 //! smooth Lambert lighting (ambient + directional diffuse), the normals and depth debug views,
-//! and a wireframe placeholder whose edge rasterization lands in a later task. Mesh loaders also
-//! live in later tasks.
+//! and a wireframe mode that draws deduplicated mesh edges via [`draw_line`]. Built-in mesh
+//! [`primitives`] (a cube and a tetrahedron) let the CLI show interactive 3D before any loader is
+//! involved.
 //!
 //! # Example
 //!
@@ -33,8 +34,10 @@
 
 mod framing;
 pub mod gltf;
+mod line;
 pub mod obj;
 mod orbit;
+pub mod primitives;
 mod raster;
 pub mod stl;
 
@@ -43,6 +46,7 @@ pub use framing::{
     perspective_fit_distance,
 };
 pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
+pub use line::draw_line;
 pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
 pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
