@@ -1,20 +1,20 @@
 //! Viewer dispatch: route a detected [`MediaKind`] to the right viewer.
 //!
 //! Viewer behavior lives behind the [`MediaViewer`] trait so tasks 021–025 can drop in real
-//! implementations without touching this dispatch layer. Until then each media family has a
-//! stub viewer that reports "not yet implemented" cleanly (a returned error, never a panic).
-
-use rgfx_core::Viewport;
+//! implementations without touching this dispatch layer. The still-image viewer (021) is real;
+//! the remaining media families still have stub viewers that report "not yet implemented" cleanly
+//! (a returned error, never a panic).
 
 use crate::config::Settings;
+use crate::image_viewer::ImageViewer;
 use crate::media::{Input, MediaKind, MeshFormat};
 
 /// Everything a viewer needs to do its job.
 ///
-/// A viewer is deliberately not handed the terminal directly: per the architectural law it
-/// produces frames into a framebuffer and the terminal layer encodes them. The skeleton passes
-/// the resolved [`Settings`] and the [`Viewport`]; real viewers (021–025) will additionally be
-/// handed a framebuffer + encoder.
+/// A viewer is deliberately not handed the terminal directly by this struct: per the architectural
+/// law it produces frames into a framebuffer and the terminal layer encodes them. A viewer that
+/// presents interactively owns its own terminal session (see [`crate::terminal::Session`]); the
+/// non-interactive `--output` path needs no terminal at all.
 #[derive(Debug)]
 pub struct ViewRequest<'a> {
     /// The input being viewed.
@@ -23,8 +23,6 @@ pub struct ViewRequest<'a> {
     pub kind: MediaKind,
     /// The effective settings after merging config and flags.
     pub settings: &'a Settings,
-    /// The terminal viewport in character cells.
-    pub viewport: Viewport,
 }
 
 /// A media viewer. Implementations render one media family.
@@ -42,18 +40,6 @@ pub trait MediaViewer {
 /// Builds a "not yet implemented" error with a consistent, user-facing message.
 fn not_yet_implemented(feature: &str, task: &str) -> anyhow::Error {
     anyhow::anyhow!("{feature} rendering is not yet implemented (arrives in task {task})")
-}
-
-/// Stub still-image viewer (task 021).
-#[derive(Debug, Default)]
-pub struct ImageViewer;
-impl MediaViewer for ImageViewer {
-    fn name(&self) -> &'static str {
-        "image"
-    }
-    fn view(&mut self, _request: &ViewRequest<'_>) -> anyhow::Result<()> {
-        Err(not_yet_implemented("image", "021"))
-    }
 }
 
 /// Stub animated-GIF viewer (task 022).
@@ -110,18 +96,12 @@ pub fn viewer_for(kind: MediaKind) -> anyhow::Result<Box<dyn MediaViewer>> {
 }
 
 /// Detects the kind, selects a viewer, and runs it. This is the whole dispatch path.
-pub fn dispatch(
-    input: &Input,
-    kind: MediaKind,
-    settings: &Settings,
-    viewport: Viewport,
-) -> anyhow::Result<()> {
+pub fn dispatch(input: &Input, kind: MediaKind, settings: &Settings) -> anyhow::Result<()> {
     let mut viewer = viewer_for(kind)?;
     let request = ViewRequest {
         input,
         kind,
         settings,
-        viewport,
     };
     tracing::info!(viewer = viewer.name(), input = %input.label(), "dispatching");
     viewer.view(&request)
@@ -130,6 +110,10 @@ pub fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn resolved_settings() -> Settings {
+        Settings::resolve(&crate::config::Config::default(), &Default::default())
+    }
 
     #[test]
     fn viewer_selection_matches_kind() {
@@ -149,16 +133,15 @@ mod tests {
 
     #[test]
     fn stubs_report_not_implemented_without_panicking() {
-        let input = Input::parse("x.png");
-        let settings = Settings::resolve(&crate::config::Config::default(), &Default::default());
-        let vp = Viewport::new(80, 24);
+        // The image viewer is real now (task 021); the remaining families are still stubs.
+        let input = Input::parse("x.dat");
+        let settings = resolved_settings();
         for kind in [
-            MediaKind::Image,
             MediaKind::Gif,
             MediaKind::Video,
             MediaKind::Mesh(MeshFormat::Gltf),
         ] {
-            let err = dispatch(&input, kind, &settings, vp).unwrap_err();
+            let err = dispatch(&input, kind, &settings).unwrap_err();
             assert!(
                 err.to_string().contains("not yet implemented"),
                 "unexpected message: {err}"
@@ -169,9 +152,8 @@ mod tests {
     #[test]
     fn dispatch_unknown_is_clean_error() {
         let input = Input::parse("x.dat");
-        let settings = Settings::resolve(&crate::config::Config::default(), &Default::default());
-        let err =
-            dispatch(&input, MediaKind::Unknown, &settings, Viewport::new(80, 24)).unwrap_err();
+        let settings = resolved_settings();
+        let err = dispatch(&input, MediaKind::Unknown, &settings).unwrap_err();
         assert!(err.to_string().contains("unsupported"));
     }
 }

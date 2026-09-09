@@ -8,13 +8,16 @@
 //! - [`media`] — [`media::MediaKind`] auto-detection from file extension and magic bytes.
 //! - [`config`] — loading `~/.config/rgfx/config.toml` and merging it with CLI flags
 //!   (defaults < file < flags).
-//! - [`dispatch`] — the [`dispatch::MediaViewer`] trait plus stub viewers that report
-//!   "not yet implemented" cleanly until the real viewers land.
-//! - [`terminal`] — a setup/teardown guard that guarantees terminal cleanup on every exit path.
-//! - [`app`] — the [`app::run`] entry point that owns the terminal and dispatches.
+//! - [`dispatch`] — the [`dispatch::MediaViewer`] trait plus the real still-image viewer and stub
+//!   viewers that report "not yet implemented" cleanly until the remaining viewers land.
+//! - [`image_viewer`] — the still-image viewer (task 021): decode → framebuffer → encode → present.
+//! - [`terminal`] — an interactive [`terminal::Session`] over `rgfx-terminal` that guarantees
+//!   terminal cleanup on every exit path.
+//! - [`app`] — the [`app::run`] entry point that loads config and dispatches.
 //!
 //! The one architectural law still holds here: this crate never decodes or rasterizes media
-//! itself. It only routes an [`Input`](media::Input) to the right viewer.
+//! itself. It composes `rgfx-image` (decode) and `rgfx-terminal` (encode) and routes an
+//! [`Input`](media::Input) to the right viewer.
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
@@ -22,6 +25,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod dispatch;
+pub mod image_viewer;
 pub mod media;
 pub mod terminal;
 
