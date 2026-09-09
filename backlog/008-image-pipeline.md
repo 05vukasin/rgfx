@@ -44,4 +44,4 @@ Dithering/tone (009), WebP/BMP/GIF (010), the CLI wiring (021).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

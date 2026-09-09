@@ -49,4 +49,4 @@ Braille/ASCII/block encoding (004/005), color (006), diff engine internals (007)
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

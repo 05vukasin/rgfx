@@ -47,4 +47,4 @@ Compose existing crates only; no new rendering logic in the CLI beyond glue + la
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

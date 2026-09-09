@@ -44,4 +44,4 @@ Playback controls (019), CLI wiring (023), the `ffmpeg-next` linked approach (fu
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

@@ -41,4 +41,4 @@ MTL materials/textures (later), STL/glTF (016/017).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

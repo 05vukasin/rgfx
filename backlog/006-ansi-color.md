@@ -45,4 +45,4 @@ The encoders themselves (004/005). Video/image color conversion (that's upstream
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

@@ -40,4 +40,4 @@ Full event integration / input routing (the host app owns input).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

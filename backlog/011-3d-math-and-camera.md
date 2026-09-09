@@ -45,4 +45,4 @@ Rasterization (013), wireframe (012), shading (014), loaders (015–017).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

@@ -55,4 +55,4 @@ Any encoder, loader, or rendering logic. This task only establishes contracts + 
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

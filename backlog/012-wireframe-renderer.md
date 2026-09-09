@@ -41,4 +41,4 @@ Filled triangles / z-buffer (013), lighting (014), file loaders.
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

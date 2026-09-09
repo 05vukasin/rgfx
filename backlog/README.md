@@ -47,34 +47,34 @@ a PR against `main`. The integrator (you) merges.
 ## Status table
 | # | Task | Crate | Depends on | Status |
 |---|------|-------|-----------|--------|
-| 001 | workspace-and-core-contracts | rgfx-core | — | ⬜ |
-| 002 | repo-meta-and-ci | (root/.github) | 001 | ⬜ |
-| 003 | terminal-backend | rgfx-terminal | 001 | ⬜ |
-| 004 | braille-encoder | rgfx-terminal | 003 | ⬜ |
-| 005 | ascii-and-block-encoders | rgfx-terminal | 003 | ⬜ |
-| 006 | ansi-color | rgfx-terminal | 003 | ⬜ |
-| 007 | frame-engine-diffing | rgfx-terminal | 003 | ⬜ |
-| 008 | image-pipeline | rgfx-image | 001 | ⬜ |
-| 009 | dithering-and-tone | rgfx-image | 008 | ⬜ |
-| 010 | image-formats-and-gif | rgfx-image | 008 | ⬜ |
-| 011 | 3d-math-and-camera | rgfx-3d | 001 | ⬜ |
-| 012 | wireframe-renderer | rgfx-3d | 011 | ⬜ |
-| 013 | triangle-rasterizer-zbuffer | rgfx-3d | 011 | ⬜ |
-| 014 | lighting-and-shading | rgfx-3d | 013 | ⬜ |
-| 015 | obj-loader | rgfx-3d | 013 | ⬜ |
-| 016 | stl-loader | rgfx-3d | 013 | ⬜ |
-| 017 | gltf-glb-loader | rgfx-3d | 013 | ⬜ |
-| 018 | video-ffmpeg-source | rgfx-video | 001, 008 | ⬜ |
-| 019 | video-playback-controls | rgfx-video | 018 | ⬜ |
-| 020 | cli-skeleton-and-config | rgfx-cli | 001 | ⬜ |
-| 021 | cli-image-viewer | rgfx-cli | 020, 008, 009, 004, 005 | ⬜ |
-| 022 | cli-3d-viewer | rgfx-cli | 020, 011-016, 003, 004, 007 | ⬜ |
-| 023 | cli-gif-video-playback | rgfx-cli | 020, 010, 018, 019 | ⬜ |
-| 024 | cli-info-command | rgfx-cli | 020, 015, 016, 017 | ⬜ |
-| 025 | cli-stdin-streaming | rgfx-cli | 020, 008 | ⬜ |
-| 026 | benchmarks | benches | 013, 004 | ⬜ |
-| 027 | packaging-and-release | (root) | 002, 022 | ⬜ |
-| 028 | rgfx-ratatui-integration | rgfx-ratatui | 007, 004 | ⬜ |
-| 029 | avatar-animation-api | rgfx-core/rgfx-terminal | 004, 007 | ⬜ |
+| 001 | workspace-and-core-contracts | rgfx-core | — | ✅ |
+| 002 | repo-meta-and-ci | (root/.github) | 001 | ✅ |
+| 003 | terminal-backend | rgfx-terminal | 001 | ✅ |
+| 004 | braille-encoder | rgfx-terminal | 003 | ✅ |
+| 005 | ascii-and-block-encoders | rgfx-terminal | 003 | ✅ |
+| 006 | ansi-color | rgfx-terminal | 003 | ✅ |
+| 007 | frame-engine-diffing | rgfx-terminal | 003 | ✅ |
+| 008 | image-pipeline | rgfx-image | 001 | ✅ |
+| 009 | dithering-and-tone | rgfx-image | 008 | ✅ |
+| 010 | image-formats-and-gif | rgfx-image | 008 | ✅ |
+| 011 | 3d-math-and-camera | rgfx-3d | 001 | ✅ |
+| 012 | wireframe-renderer | rgfx-3d | 011 | ✅ |
+| 013 | triangle-rasterizer-zbuffer | rgfx-3d | 011 | ✅ |
+| 014 | lighting-and-shading | rgfx-3d | 013 | ✅ |
+| 015 | obj-loader | rgfx-3d | 013 | ✅ |
+| 016 | stl-loader | rgfx-3d | 013 | ✅ |
+| 017 | gltf-glb-loader | rgfx-3d | 013 | ✅ |
+| 018 | video-ffmpeg-source | rgfx-video | 001, 008 | ✅ |
+| 019 | video-playback-controls | rgfx-video | 018 | ✅ |
+| 020 | cli-skeleton-and-config | rgfx-cli | 001 | ✅ |
+| 021 | cli-image-viewer | rgfx-cli | 020, 008, 009, 004, 005 | ✅ |
+| 022 | cli-3d-viewer | rgfx-cli | 020, 011-016, 003, 004, 007 | ✅ |
+| 023 | cli-gif-video-playback | rgfx-cli | 020, 010, 018, 019 | ✅ |
+| 024 | cli-info-command | rgfx-cli | 020, 015, 016, 017 | ✅ |
+| 025 | cli-stdin-streaming | rgfx-cli | 020, 008 | ✅ |
+| 026 | benchmarks | benches | 013, 004 | ✅ |
+| 027 | packaging-and-release | (root) | 002, 022 | ✅ |
+| 028 | rgfx-ratatui-integration | rgfx-ratatui | 007, 004 | ✅ |
+| 029 | avatar-animation-api | rgfx-core/rgfx-terminal | 004, 007 | ✅ |
 
 Keep this table in sync as tasks progress (or regenerate from the per-file Completion sections).

@@ -46,4 +46,4 @@ Actually publishing to crates.io / AUR (manual, owner-gated). macOS/Windows targ
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

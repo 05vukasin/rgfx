@@ -39,4 +39,4 @@ OBJ/glTF. Color (STL is colorless; base color comes from shading).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

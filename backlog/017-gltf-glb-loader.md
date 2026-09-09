@@ -41,4 +41,4 @@ Textures, PBR, skinning, animation playback (future tasks). Point clouds (later)
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

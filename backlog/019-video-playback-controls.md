@@ -42,4 +42,4 @@ Audio (later). CLI key bindings (023).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

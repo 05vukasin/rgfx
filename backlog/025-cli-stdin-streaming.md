@@ -40,4 +40,4 @@ Named pipes / Unix sockets / child-process sources (future). Programmatic Rust p
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

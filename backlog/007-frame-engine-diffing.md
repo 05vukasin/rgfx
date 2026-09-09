@@ -46,4 +46,4 @@ The encoders (004/005) and color serialization (006) — consume their output.
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

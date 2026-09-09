@@ -40,4 +40,4 @@ MP4/WebM video (018). CLI playback loop (023).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

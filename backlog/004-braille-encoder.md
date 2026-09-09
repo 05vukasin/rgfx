@@ -46,4 +46,4 @@ ANSI color (006) — but structure the encoder so 006 can add per-cell color wit
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

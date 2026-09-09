@@ -47,4 +47,4 @@ Lighting/flat/smooth shading (014), mesh file loaders (015–017).
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)

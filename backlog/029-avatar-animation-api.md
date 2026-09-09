@@ -42,4 +42,4 @@ Rigged/skeletal animation, glTF animation playback (future 3D task). Audio.
 - [ ] PR opened: <!-- url -->
 - [ ] Merged to `main`
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)
