@@ -1,6 +1,7 @@
 //! Resize options and the blit that writes a decoded image into a framebuffer.
 
 use crate::aspect::{fit_dimensions, pixel_aspect};
+use crate::preprocess::Preprocess;
 use image::RgbaImage;
 use image::imageops::FilterType;
 use rgfx_core::{Color, Framebuffer, Viewport};
@@ -50,6 +51,9 @@ pub struct RenderOptions {
     pub filter: ResizeFilter,
     /// The letterbox/background fill for pixels outside the fitted image.
     pub background: Color,
+    /// The image-quality stage (tone + dithering) applied to the framebuffer
+    /// after the blit. Defaults to an identity transform.
+    pub preprocess: Preprocess,
 }
 
 impl RenderOptions {
@@ -61,6 +65,7 @@ impl RenderOptions {
             cell_aspect: 0.5,
             filter: ResizeFilter::Lanczos3,
             background: Color::TRANSPARENT,
+            preprocess: Preprocess::IDENTITY,
         }
     }
 
@@ -72,6 +77,7 @@ impl RenderOptions {
             cell_aspect: 0.5,
             filter: ResizeFilter::Lanczos3,
             background: Color::TRANSPARENT,
+            preprocess: Preprocess::IDENTITY,
         }
     }
 
@@ -83,6 +89,7 @@ impl RenderOptions {
             cell_aspect: 0.5,
             filter: ResizeFilter::Lanczos3,
             background: Color::TRANSPARENT,
+            preprocess: Preprocess::IDENTITY,
         }
     }
 
@@ -135,4 +142,7 @@ pub(crate) fn render_into(
             target.set(ox + x, oy + y, Color::from_u8(r, g, b, a));
         }
     }
+
+    // The image-quality stage runs in place on the finished framebuffer.
+    opts.preprocess.apply(target);
 }
