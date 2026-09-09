@@ -1,4 +1,5 @@
-//! PNG/JPEG decoding into an in-memory RGBA image and the framebuffer bridge.
+//! Still-image (PNG/JPEG/WebP/BMP) decoding into an in-memory RGBA image and
+//! the framebuffer bridge.
 
 use crate::render::{RenderOptions, render_into};
 use image::{ImageError, ImageFormat, RgbaImage};
@@ -16,21 +17,25 @@ pub struct DecodedImage {
 }
 
 impl DecodedImage {
-    /// Loads and decodes a PNG or JPEG image from `path`.
+    /// Loads and decodes a still image (PNG, JPEG, WebP, or BMP) from `path`.
+    ///
+    /// Animated GIFs are handled by [`crate::GifSource`] rather than here.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] if the file cannot be read, [`Error::Unsupported`]
     /// if the bytes are a recognized-but-unsupported format (anything other than
-    /// PNG/JPEG), and [`Error::Decode`] if the bytes are malformed. Never panics.
+    /// PNG/JPEG/WebP/BMP), and [`Error::Decode`] if the bytes are malformed.
+    /// Never panics.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         Self::from_bytes(&bytes)
     }
 
-    /// Decodes a PNG or JPEG image from in-memory `bytes`.
+    /// Decodes a still image (PNG, JPEG, WebP, or BMP) from in-memory `bytes`.
     ///
     /// The format is detected from the byte content, not a file extension.
+    /// Animated GIFs are handled by [`crate::GifSource`] rather than here.
     ///
     /// # Errors
     ///
@@ -39,7 +44,7 @@ impl DecodedImage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let format = image::guess_format(bytes).map_err(map_image_error)?;
         match format {
-            ImageFormat::Png | ImageFormat::Jpeg => {}
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Bmp => {}
             other => {
                 return Err(Error::Unsupported(format!("{other:?}")));
             }
@@ -102,7 +107,7 @@ impl DecodedImage {
 }
 
 /// Maps an [`ImageError`] into the shared rgfx [`Error`].
-fn map_image_error(err: ImageError) -> Error {
+pub(crate) fn map_image_error(err: ImageError) -> Error {
     let msg = err.to_string();
     match err {
         ImageError::Unsupported(_) => Error::Unsupported(msg),
@@ -128,6 +133,31 @@ mod tests {
         8, 2, 65, 226, 24, 135, 136, 68, 164, 129, 190, 195, 45, 39, 105, 214, 8, 10, 201, 4, 130,
         250, 35, 4, 130, 230, 163, 4, 130, 118, 246, 0, 227, 233, 33, 113, 203, 159, 183, 128, 0,
         0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    /// A 2×2 lossless WebP: (0,0)=red, (1,0)=green, (0,1)=blue, (1,1)=white,
+    /// all opaque. Generated once from known pixels with a lossless encoder.
+    const TEST_WEBP_2X2: &[u8] = &[
+        82, 73, 70, 70, 152, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, //
+        140, 0, 0, 0, 47, 1, 64, 0, 16, 205, 85, 32, 34, 2, 30, 72, //
+        0, 0, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0, 64, 0, 0, 0, 15, 68, 2, 0, 0, 0, 0, //
+        224, 252, 61, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+        0, 0, 228, 129, 72, 0, 0, 0, 0, 0, 156, 255, 3, 0, 0, 0, //
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 34, 233, 11, 0,
+    ];
+
+    /// A 2×2 24-bit BMP: (0,0)=red, (1,0)=green, (0,1)=blue, (1,1)=(10,20,30),
+    /// all opaque. Generated once from known pixels.
+    const TEST_BMP_2X2: &[u8] = &[
+        66, 77, 138, 0, 0, 0, 0, 0, 0, 0, 122, 0, 0, 0, 108, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 1, 0,
+        32, 0, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255,
+        0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 66, 71, 82, 115, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 255, 30, 20, 10, 255, 0, 0, 255, 255, 0, 255, 0, 255,
     ];
 
     /// A 2×2 solid opaque-blue PNG.
@@ -161,6 +191,26 @@ mod tests {
             }
         }
         assert_eq!(img.color_at(4, 0), None);
+    }
+
+    #[test]
+    fn decodes_2x2_webp_to_known_pixels() {
+        let img = DecodedImage::from_bytes(TEST_WEBP_2X2).unwrap();
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.rgba_at(0, 0), Some((255, 0, 0, 255)));
+        assert_eq!(img.rgba_at(1, 0), Some((0, 255, 0, 255)));
+        assert_eq!(img.rgba_at(0, 1), Some((0, 0, 255, 255)));
+        assert_eq!(img.rgba_at(1, 1), Some((255, 255, 255, 255)));
+    }
+
+    #[test]
+    fn decodes_2x2_bmp_to_known_pixels() {
+        let img = DecodedImage::from_bytes(TEST_BMP_2X2).unwrap();
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.rgba_at(0, 0), Some((255, 0, 0, 255)));
+        assert_eq!(img.rgba_at(1, 0), Some((0, 255, 0, 255)));
+        assert_eq!(img.rgba_at(0, 1), Some((0, 0, 255, 255)));
+        assert_eq!(img.rgba_at(1, 1), Some((10, 20, 30, 255)));
     }
 
     #[test]
