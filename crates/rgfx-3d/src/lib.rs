@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 
 mod framing;
+pub mod obj;
 mod orbit;
 mod raster;
 
@@ -39,6 +40,7 @@ pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
     perspective_fit_distance,
 };
+pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
 pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
 
