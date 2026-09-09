@@ -1,0 +1,13 @@
+[package]
+name = "rgfx-ratatui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embed an rgfx framebuffer as a ratatui widget"
+
+[dependencies]
+rgfx-core = { path = "../rgfx-core" }
+rgfx-terminal = { path = "../rgfx-terminal" }
+ratatui.workspace = true
