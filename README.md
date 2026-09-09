@@ -112,7 +112,21 @@ cargo build --workspace
 
 ## Install
 
-### From a release archive (recommended)
+### One-line installer (recommended)
+
+The installer detects your OS/architecture, resolves the latest release,
+downloads the matching archive, **verifies its SHA-256 checksum**, and installs
+`rgfx` to `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/05vukasin/rgfx/main/install.sh | bash
+```
+
+Overridable via environment variables: `RGFX_REPO`, `RGFX_INSTALL_DIR`,
+`RGFX_VERSION`. Make sure `~/.local/bin` is on your `PATH` (the script prints
+guidance if it is not).
+
+### From a release archive (manual)
 
 Prebuilt Linux binaries are published on the
 [Releases page](https://github.com/05vukasin/rgfx/releases) for
@@ -137,6 +151,16 @@ install -m755 rgfx "$HOME/.local/bin/rgfx"
 ```
 
 Make sure `~/.local/bin` is on your `PATH`.
+
+### Arch Linux / CachyOS (AUR)
+
+PKGBUILD templates live in [`packaging/aur/`](packaging/aur/):
+
+```bash
+yay -S rgfx       # stable source build
+yay -S rgfx-bin   # prebuilt release binary
+yay -S rgfx-git   # latest main branch
+```
 
 ### From source
 

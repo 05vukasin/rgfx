@@ -5,8 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 authors.workspace = true
+readme.workspace = true
 description = "Core contracts for rgfx: framebuffer, color, geometry, camera, and the encoder/renderer/frame-source traits."
+keywords = ["terminal", "graphics", "framebuffer", "rendering", "tui"]
+categories = ["rendering", "graphics", "command-line-interface"]
 
 [dependencies]
 thiserror.workspace = true

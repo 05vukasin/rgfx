@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Embed an rgfx framebuffer as a ratatui widget"
+keywords = ["ratatui", "terminal", "tui", "widget", "graphics"]
+categories = ["command-line-interface", "rendering"]
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }

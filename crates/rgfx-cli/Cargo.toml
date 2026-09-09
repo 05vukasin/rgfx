@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "The rgfx command-line binary: argument parsing, media detection, config, and viewer dispatch."
+keywords = ["terminal", "graphics", "image", "video", "cli"]
+categories = ["command-line-utilities", "multimedia", "rendering"]
 
 [[bin]]
 name = "rgfx"

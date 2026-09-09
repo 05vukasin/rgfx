@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Safe terminal lifecycle, input events, and buffered output for rgfx"
+keywords = ["terminal", "tui", "ansi", "crossterm", "cli"]
+categories = ["command-line-interface", "rendering"]
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }
