@@ -21,16 +21,13 @@ use std::time::Duration;
 use anyhow::Context;
 use rgfx_core::{Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 use rgfx_image::{BayerSize, DecodedImage, Dither, Preprocess, RenderOptions, Tone};
-use rgfx_terminal::{AsciiEncoder, BlockEncoder, BrailleEncoder};
+use rgfx_terminal::{AsciiEncoder, BlockEncoder, BrailleEncoder, terminal_size};
 
 use crate::cli::{DitherMode, Renderer};
 use crate::config::Settings;
 use crate::dispatch::{MediaViewer, ViewRequest};
 use crate::media::Input;
 use crate::terminal::{Session, Signal};
-
-/// Render width in columns used for non-interactive `--output` when no `--width` was given.
-const DEFAULT_OUTPUT_COLS: u16 = 80;
 
 /// How long the interactive loop blocks on input between checks. A still image never redraws on
 /// its own, so this only bounds shutdown latency; resize events wake the loop immediately.
@@ -67,7 +64,8 @@ impl MediaViewer for ImageViewer {
 pub(crate) fn view_decoded(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
     match &settings.output {
         Some(out) => write_output(image, settings, out),
-        None => run_interactive(image, settings),
+        None if settings.interactive => run_interactive(image, settings),
+        None => run_inline(image, settings),
     }
 }
 
@@ -214,7 +212,10 @@ fn render_viewport(
         }
         None => match bounds {
             Some(bounds) => fit_within(w, h, bounds, cell_aspect),
-            None => viewport_for_width(w, h, DEFAULT_OUTPUT_COLS, cell_aspect),
+            // No explicit width and no fit-bounds (the `--output`/text path): follow the real
+            // terminal width, letting rows follow the image aspect (height is not capped, so a
+            // saved dump keeps the whole image). Falls back to 80 cols with no terminal.
+            None => viewport_for_width(w, h, terminal_size().cols, cell_aspect),
         },
     }
 }
@@ -243,6 +244,31 @@ fn write_output(image: &DecodedImage, settings: &Settings, out: &Path) -> anyhow
     std::fs::write(out, render_to_text(image, settings))
         .with_context(|| format!("writing output to {}", out.display()))?;
     tracing::info!(path = %out.display(), "wrote encoded image");
+    Ok(())
+}
+
+/// The fit-bounds for inline rendering: the terminal minus one row of headroom.
+///
+/// Reserving a row means that after the image is printed, the shell prompt lands on the spare
+/// line instead of forcing the terminal to scroll — which would clip the top of the image (the
+/// "misaligned by N rows" bug). Never returns a zero dimension.
+fn inline_bounds(term: Viewport) -> Viewport {
+    Viewport::new(term.cols.max(1), term.rows.saturating_sub(1).max(1))
+}
+
+/// Prints the image inline at the current terminal size and returns to the shell.
+///
+/// This is the default for a still image: no raw mode, no alternate screen, no `q`. The render is
+/// fit within `(cols, rows - 1)` — one row of headroom so the shell prompt that appears after the
+/// image does not push the terminal to scroll and clip the top row. An explicit `--width` still
+/// overrides (rows then follow the image aspect and the output may exceed the viewport height,
+/// which is the caller's choice). Output goes to stdout as a single write with a trailing newline.
+fn run_inline(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
+    let bounds = inline_bounds(terminal_size());
+    let mut fb = Framebuffer::new(0, 0);
+    let frame = render_frame(image, settings, Some(bounds), &mut fb);
+    // Print the whole frame; the trailing newline keeps the returning prompt on its own line.
+    println!("{}", frame.to_text());
     Ok(())
 }
 
@@ -305,6 +331,45 @@ mod tests {
         assert_eq!(viewport_for_width(100, 200, 40, 0.5), Viewport::new(40, 40));
         // Rows never collapse below 1.
         assert_eq!(viewport_for_width(1000, 1, 4, 0.5).rows, 1);
+    }
+
+    #[test]
+    fn a_still_image_is_inline_by_default() {
+        // Regression (task 030): the default must be inline print-and-return, not the
+        // full-screen interactive viewer. `--interactive` opts back in.
+        let s = settings(RenderOpts::default());
+        assert!(
+            !s.interactive,
+            "still images must default to inline, not interactive"
+        );
+        assert!(s.output.is_none());
+    }
+
+    #[test]
+    fn inline_bounds_reserves_one_row_of_headroom() {
+        // Regression (task 030): inline height leaves a row for the returning prompt so the
+        // image never scrolls off the top.
+        assert_eq!(
+            inline_bounds(Viewport::new(100, 30)),
+            Viewport::new(100, 29)
+        );
+        // Never collapses to zero on a degenerate terminal.
+        assert_eq!(inline_bounds(Viewport::new(0, 0)), Viewport::new(1, 1));
+        assert_eq!(inline_bounds(Viewport::new(80, 1)), Viewport::new(80, 1));
+    }
+
+    #[test]
+    fn inline_render_fits_within_the_reserved_bounds() {
+        // A 2:1 image (4 cols/row) in a 100×30 terminal: inline bounds 100×29, width-fit → 25
+        // rows, which is ≤ 29 so nothing scrolls.
+        let img = DecodedImage::from_bytes(rgfx_image::doctest_png()).unwrap();
+        let bounds = inline_bounds(Viewport::new(100, 30));
+        let vp = render_viewport(&img, &settings(RenderOpts::default()), Some(bounds), 0.5);
+        assert!(
+            vp.rows <= bounds.rows,
+            "inline render must fit within the reserved rows"
+        );
+        assert!(vp.cols <= bounds.cols);
     }
 
     #[test]

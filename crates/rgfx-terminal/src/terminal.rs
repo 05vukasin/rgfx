@@ -91,6 +91,31 @@ impl Backend for CrosstermBackend {
     }
 }
 
+/// Best-effort current terminal size in character cells, usable **without** entering graphics
+/// mode (no raw mode, no alternate screen).
+///
+/// Resolution order, first success wins: the controlling terminal's reported size, then the
+/// `COLUMNS`/`LINES` environment variables, then a conventional `80×24` fallback. This never
+/// fails, so inline rendering always gets a usable viewport even over SSH, in a pipe, or under a
+/// terminal that does not answer the size query.
+pub fn terminal_size() -> Viewport {
+    if let Ok((cols, rows)) = crossterm::terminal::size() {
+        if cols > 0 && rows > 0 {
+            return Viewport::new(cols, rows);
+        }
+    }
+    let env_dim = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u16>().ok())
+            .filter(|n| *n > 0)
+    };
+    if let (Some(cols), Some(rows)) = (env_dim("COLUMNS"), env_dim("LINES")) {
+        return Viewport::new(cols, rows);
+    }
+    Viewport::new(80, 24)
+}
+
 /// Configuration for how a [`Terminal`] enters graphics mode.
 #[derive(Debug, Clone, Copy)]
 pub struct TerminalOptions {
