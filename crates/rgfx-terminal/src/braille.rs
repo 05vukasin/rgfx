@@ -62,6 +62,22 @@ pub fn braille_char(mask: u8) -> char {
     char::from_u32(BRAILLE_BASE + mask as u32).expect("braille code point is always valid")
 }
 
+/// The 2×4 grid of lit subpixels encoded by a Braille dot `mask`, indexed `[dx][dy]`.
+///
+/// This is the inverse of [`braille_char`]'s bit packing: `braille_dots` recovers which of the
+/// eight subpixels a glyph lights, so callers can turn a Braille glyph back into the framebuffer
+/// pixels that reproduce it (`true` → lit). Used to author Braille-based animation frames.
+#[must_use]
+pub fn braille_dots(mask: u8) -> [[bool; 4]; 2] {
+    let mut dots = [[false; 4]; 2];
+    for (dx, column) in DOT_MASK.iter().enumerate() {
+        for (dy, &bit) in column.iter().enumerate() {
+            dots[dx][dy] = mask & bit != 0;
+        }
+    }
+    dots
+}
+
 /// Tunable options controlling how framebuffer luminance becomes lit/unlit Braille dots.
 ///
 /// The luminance pipeline for each subpixel is, in order: sample [`Framebuffer::luma`], apply
@@ -290,6 +306,24 @@ mod tests {
             );
             // DOT_MASK constant agrees with the observed bit.
             assert_eq!(DOT_MASK[dx][dy], bit);
+        }
+    }
+
+    #[test]
+    fn braille_dots_inverts_the_bit_packing() {
+        // Empty and full round-trip.
+        assert_eq!(braille_dots(0x00), [[false; 4]; 2]);
+        assert_eq!(braille_dots(0xFF), [[true; 4]; 2]);
+        // Each single-dot mask lights exactly the pixel DOT_MASK maps it to.
+        for (dx, column) in DOT_MASK.iter().enumerate() {
+            for (dy, &bit) in column.iter().enumerate() {
+                let dots = braille_dots(bit);
+                for (x, col) in dots.iter().enumerate() {
+                    for (y, &lit) in col.iter().enumerate() {
+                        assert_eq!(lit, x == dx && y == dy);
+                    }
+                }
+            }
         }
     }
 
