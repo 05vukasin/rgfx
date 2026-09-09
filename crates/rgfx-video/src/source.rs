@@ -79,14 +79,40 @@ impl VideoSource {
     /// spawn, or [`Error::Decode`]/[`Error::Config`] if the probe reports an
     /// unusable stream. Never panics.
     pub fn open(path: impl AsRef<Path>, viewport: Viewport, opts: RenderOptions) -> Result<Self> {
+        Self::open_at(path, viewport, opts, None)
+    }
+
+    /// Opens `path` for decoding into `viewport`, starting playback at `start`.
+    ///
+    /// When `start` is `Some`, `ffmpeg` is spawned with an input `-ss` seek so
+    /// its output stream begins at (approximately, ±1 frame) that offset. This
+    /// backs [`crate::Player::seek`] by respawning the decoder at the target
+    /// position. `None` decodes from the beginning, exactly like
+    /// [`VideoSource::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::External`] if `ffmpeg`/`ffprobe` are missing or fail to
+    /// spawn, or [`Error::Decode`]/[`Error::Config`] if the probe reports an
+    /// unusable stream. Never panics.
+    pub fn open_at(
+        path: impl AsRef<Path>,
+        viewport: Viewport,
+        opts: RenderOptions,
+        start: Option<Duration>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let info = probe(path)?;
         let ffmpeg = find_ffmpeg()?;
 
-        let mut child = Command::new(&ffmpeg)
-            .arg("-nostdin")
-            .arg("-loglevel")
-            .arg("error")
+        let mut command = Command::new(&ffmpeg);
+        command.arg("-nostdin").arg("-loglevel").arg("error");
+        // Input seeking (`-ss` before `-i`) is fast and frame-accurate enough
+        // for scrubbing; place it ahead of the input as ffmpeg requires.
+        if let Some(offset) = start {
+            command.arg("-ss").arg(crate::playback::format_ss(offset));
+        }
+        let mut child = command
             .arg("-i")
             .arg(path)
             .arg("-f")
@@ -133,6 +159,37 @@ impl VideoSource {
     /// The viewport this source renders into.
     pub fn viewport(&self) -> Viewport {
         self.viewport
+    }
+
+    /// Decodes and discards the next frame without converting it into a
+    /// framebuffer.
+    ///
+    /// This backs the player's adaptive frame skipping: dropping a frame here
+    /// avoids the resize/blit work that [`FrameSource::next_frame`] performs,
+    /// so catching up stays cheap. Returns `Ok(true)` if a frame was dropped,
+    /// `Ok(false)` at end of stream.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the same decode/IO errors as [`FrameSource::next_frame`],
+    /// reaping the child before reporting. Never panics.
+    pub fn skip_frame(&mut self) -> Result<bool> {
+        if self.finished {
+            return Ok(false);
+        }
+        match self.reader.next_frame() {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => {
+                self.finished = true;
+                self.reap();
+                Ok(false)
+            }
+            Err(e) => {
+                self.finished = true;
+                self.reap();
+                Err(e)
+            }
+        }
     }
 
     /// Kills and reaps the ffmpeg child, ignoring errors (it may already have
