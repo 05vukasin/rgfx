@@ -37,32 +37,28 @@ pub trait MediaViewer {
     fn view(&mut self, request: &ViewRequest<'_>) -> anyhow::Result<()>;
 }
 
-/// Builds a "not yet implemented" error with a consistent, user-facing message.
-fn not_yet_implemented(feature: &str, task: &str) -> anyhow::Error {
-    anyhow::anyhow!("{feature} rendering is not yet implemented (arrives in task {task})")
-}
-
-/// Stub animated-GIF viewer (task 022).
+/// The animated-GIF viewer (task 023): drives a `GifSource` through the frame engine.
 #[derive(Debug, Default)]
 pub struct GifViewer;
 impl MediaViewer for GifViewer {
     fn name(&self) -> &'static str {
         "gif"
     }
-    fn view(&mut self, _request: &ViewRequest<'_>) -> anyhow::Result<()> {
-        Err(not_yet_implemented("animated GIF", "022"))
+    fn view(&mut self, request: &ViewRequest<'_>) -> anyhow::Result<()> {
+        crate::playback_viewer::view_gif(request)
     }
 }
 
-/// Stub video viewer (task 024).
+/// The video viewer (task 023): drives the `ffmpeg` player through the frame engine, or reports a
+/// clean note when `ffmpeg` support was not compiled in.
 #[derive(Debug, Default)]
 pub struct VideoViewer;
 impl MediaViewer for VideoViewer {
     fn name(&self) -> &'static str {
         "video"
     }
-    fn view(&mut self, _request: &ViewRequest<'_>) -> anyhow::Result<()> {
-        Err(not_yet_implemented("video", "024"))
+    fn view(&mut self, request: &ViewRequest<'_>) -> anyhow::Result<()> {
+        crate::playback_viewer::view_video(request)
     }
 }
 
@@ -132,15 +128,17 @@ mod tests {
     }
 
     #[test]
-    fn stubs_report_not_implemented_without_panicking() {
-        // The image viewer (021) and mesh viewer (022) are real now; GIF and video remain stubs.
-        let input = Input::parse("x.dat");
+    fn gif_and_video_are_real_and_error_cleanly_on_bad_input() {
+        // GIF and video viewers are real now (023). A nonexistent file errors cleanly (never
+        // panics, never "not yet implemented"): the GIF viewer fails to read the file, and the
+        // video viewer fails to open it (or, without the `ffmpeg` feature, reports the build note).
+        let input = Input::parse("does-not-exist.dat");
         let settings = resolved_settings();
         for kind in [MediaKind::Gif, MediaKind::Video] {
             let err = dispatch(&input, kind, &settings).unwrap_err();
             assert!(
-                err.to_string().contains("not yet implemented"),
-                "unexpected message: {err}"
+                !err.to_string().contains("not yet implemented"),
+                "unexpected stub message: {err}"
             );
         }
     }

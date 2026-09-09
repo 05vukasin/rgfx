@@ -32,6 +32,7 @@ pub mod image_viewer;
 pub mod info;
 pub mod media;
 pub mod mesh_viewer;
+pub mod playback_viewer;
 pub mod stream;
 pub mod terminal;
 
