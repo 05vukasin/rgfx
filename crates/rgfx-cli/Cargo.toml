@@ -19,9 +19,20 @@ path = "src/lib.rs"
 rgfx-core = { path = "../rgfx-core" }
 rgfx-image = { path = "../rgfx-image" }
 rgfx-terminal = { path = "../rgfx-terminal" }
+rgfx-3d = { path = "../rgfx-3d" }
+rgfx-video = { path = "../rgfx-video" }
 anyhow.workspace = true
 clap.workspace = true
+image.workspace = true
 serde.workspace = true
+serde_json = "1"
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[features]
+# Enables the ffprobe-backed `rgfx info` metadata for video files by turning on
+# `rgfx-video`'s `ffmpeg` feature. Without it, `rgfx info <video>` still reports
+# the container (from the file) and prints a clear note instead of probing.
+default = []
+ffmpeg = ["rgfx-video/ffmpeg"]
