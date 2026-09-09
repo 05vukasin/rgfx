@@ -1,8 +1,9 @@
 //! Application entry point: turn a parsed [`Cli`] into actions.
 //!
 //! [`run`] initializes tracing, loads and merges configuration, and then either handles the
-//! `info` subcommand or enters the render path. The render path owns a [`TerminalGuard`] so the
-//! terminal is always restored, then dispatches to a viewer.
+//! `info` subcommand or enters the render path. The render path detects the media kind and
+//! dispatches to a viewer; each interactive viewer owns its own terminal session (which restores
+//! the terminal on every exit path), while `--output` renders non-interactively with no terminal.
 
 use std::io::Read;
 
@@ -10,7 +11,6 @@ use crate::cli::{Cli, Command};
 use crate::config::{Config, Settings};
 use crate::dispatch;
 use crate::media::{self, Input, MediaKind};
-use crate::terminal::TerminalGuard;
 
 /// Runs `rgfx` for a parsed command line.
 ///
@@ -74,14 +74,9 @@ fn run_render(file: &str, settings: &Settings) -> anyhow::Result<()> {
         );
     }
 
-    // Enter the terminal *after* we know the input is renderable, so `info`-style failures never
-    // flip the terminal into raw mode. The guard restores the terminal on every exit path.
-    let guard = TerminalGuard::enter()?;
-    let viewport = guard.viewport();
-    let result = dispatch::dispatch(&input, kind, settings, viewport);
-    // `guard` drops here (or on unwind), guaranteeing teardown before the error propagates.
-    drop(guard);
-    result
+    // The viewer owns its own terminal lifecycle when it presents interactively; the `--output`
+    // path never touches the terminal. Either way, dispatch is the whole render path.
+    dispatch::dispatch(&input, kind, settings)
 }
 
 /// Detects the media kind of an input, reading a stdin peek when needed.
@@ -145,14 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn render_supported_reaches_stub_viewer() {
-        // A .png (by extension) is supported → dispatch runs → stub reports not-implemented.
+    fn render_missing_image_is_clean_error() {
+        // A .png (by extension) is supported → dispatch runs the real image viewer, which fails
+        // cleanly (never panics) when the file cannot be loaded.
         let settings = Settings::resolve(&Config::default(), &Default::default());
-        let err = run_render("picture.png", &settings).unwrap_err();
-        assert!(
-            err.to_string().contains("not yet implemented"),
-            "got: {err}"
-        );
+        let err = run_render("does-not-exist.png", &settings).unwrap_err();
+        assert!(err.to_string().contains("loading image"), "got: {err}");
     }
 
     #[test]
