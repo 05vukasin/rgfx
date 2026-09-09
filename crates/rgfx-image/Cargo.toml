@@ -1,0 +1,13 @@
+[package]
+name = "rgfx-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Still-image (PNG/JPEG) decode, aspect-correct resize, and framebuffer conversion for rgfx"
+
+[dependencies]
+rgfx-core = { path = "../rgfx-core" }
+image.workspace = true
+thiserror.workspace = true
