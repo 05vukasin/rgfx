@@ -1,4 +1,9 @@
 # rgfx
+[![CI](https://github.com/05vukasin/rgfx/actions/workflows/ci.yml/badge.svg)](https://github.com/05vukasin/rgfx/actions/workflows/ci.yml)
+[![Release](https://github.com/05vukasin/rgfx/actions/workflows/release.yml/badge.svg)](https://github.com/05vukasin/rgfx/actions/workflows/release.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
+
 
 > **A universal terminal graphics engine for images, video, animation, and interactive 3D model previews — written in Rust.**
 
@@ -50,6 +55,118 @@ Rendering target: Terminal / TTY
 License: MIT or Apache-2.0
 First public milestone: Interactive OBJ/STL 3D viewer using Unicode Braille
 ```
+
+---
+
+# Getting Started
+
+## Requirements
+
+- Rust 1.85+ (edition 2024). Install via [rustup](https://rustup.rs).
+- Linux is the primary supported platform.
+- `ffmpeg` is **optional** — it is only needed for video decoding (feature-gated).
+  The base workspace builds and runs without it.
+
+On Arch Linux / CachyOS:
+
+```bash
+sudo pacman -S --needed base-devel git rust cargo
+# optional, for video support:
+sudo pacman -S --needed ffmpeg
+```
+
+## Build
+
+```bash
+git clone https://github.com/05vukasin/rgfx.git
+cd rgfx
+cargo build --workspace              # debug build, no ffmpeg required
+cargo build --workspace --release    # optimized build
+```
+
+## Run
+
+Once the CLI crate is in place, run it through Cargo during development:
+
+```bash
+cargo run -p rgfx-cli -- model.obj
+cargo run -p rgfx-cli -- image.png --renderer braille
+```
+
+Or run the compiled release binary directly:
+
+```bash
+./target/release/rgfx model.obj
+```
+
+## Test
+
+The workspace mirrors the CI gate. Before opening a PR, run:
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo build --workspace
+```
+
+## Install
+
+### From a release archive (recommended)
+
+Prebuilt Linux binaries are published on the
+[Releases page](https://github.com/05vukasin/rgfx/releases) for
+`x86_64` and `aarch64`. Each release ships:
+
+```text
+rgfx-linux-x86_64.tar.gz
+rgfx-linux-aarch64.tar.gz
+SHA256SUMS
+```
+
+Download the archive for your architecture, verify it against `SHA256SUMS`,
+extract it, and place the `rgfx` binary on your `PATH`:
+
+```bash
+ARCH="$(uname -m)"   # x86_64 or aarch64
+curl -fLO "https://github.com/05vukasin/rgfx/releases/latest/download/rgfx-linux-${ARCH}.tar.gz"
+curl -fLO "https://github.com/05vukasin/rgfx/releases/latest/download/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf "rgfx-linux-${ARCH}.tar.gz"
+install -m755 rgfx "$HOME/.local/bin/rgfx"
+```
+
+Make sure `~/.local/bin` is on your `PATH`.
+
+### From source
+
+```bash
+cargo install --path crates/rgfx-cli
+```
+
+---
+
+# License
+
+`rgfx` is dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option. Copyright the rgfx authors.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual-licensed as above, without any additional terms or conditions.
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the
+engineering conventions and PR flow, and note that this project follows the
+[Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). Security issues should
+be reported per [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -2446,3 +2563,4 @@ A file manager can use it for image, video, and 3D previews.
 The project should therefore be positioned as:
 
 > **rgfx — a universal media and 3D graphics engine for the terminal.**
+

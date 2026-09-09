@@ -1,0 +1,64 @@
+name: Bug report
+description: Report something that is broken or behaving incorrectly.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill out the
+        sections below so we can reproduce and fix the issue.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands / files needed to reproduce the behavior.
+      placeholder: |
+        1. Run `rgfx model.obj ...`
+        2. ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include error output or a screenshot/recording.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/distribution, terminal emulator, `rgfx --version`, and `rustc --version`.
+      placeholder: |
+        - OS: CachyOS (Linux 6.x)
+        - Terminal: kitty 0.x
+        - rgfx: 0.1.0
+        - rustc: 1.85.0
+    validations:
+      required: true
+  - type: input
+    id: media
+    attributes:
+      label: Input file / media type
+      description: The kind of file involved (PNG, OBJ, STL, MP4, ...), if relevant.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might help — logs, related issues, etc.
