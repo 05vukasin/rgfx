@@ -17,6 +17,8 @@ path = "src/lib.rs"
 
 [dependencies]
 rgfx-core = { path = "../rgfx-core" }
+rgfx-image = { path = "../rgfx-image" }
+rgfx-terminal = { path = "../rgfx-terminal" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

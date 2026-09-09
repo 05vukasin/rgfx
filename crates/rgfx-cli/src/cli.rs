@@ -69,9 +69,39 @@ pub struct RenderOpts {
     #[arg(long)]
     pub color: bool,
 
+    /// Dithering algorithm applied before a 1-bit (Braille) encoder thresholds the image.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub dither: Option<DitherMode>,
+
+    /// Gamma exponent applied to luminance before encoding (`1.0` = identity).
+    #[arg(long, value_name = "G")]
+    pub gamma: Option<f32>,
+
+    /// Contrast multiplier about mid-grey applied before encoding (`1.0` = identity).
+    #[arg(long, value_name = "C")]
+    pub contrast: Option<f32>,
+
     /// Write the encoded output to a file instead of the live terminal.
     #[arg(long, value_name = "FILE")]
     pub output: Option<PathBuf>,
+}
+
+/// Dithering algorithm selection for the image-quality stage.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DitherMode {
+    /// Pick a sensible default for the chosen renderer (Floyd–Steinberg for Braille, none else).
+    Auto,
+    /// No dithering.
+    None,
+    /// Threshold each pixel's luma with no error diffusion.
+    Threshold,
+    /// Floyd–Steinberg error diffusion.
+    Floyd,
+    /// Atkinson error diffusion.
+    Atkinson,
+    /// Ordered (4×4 Bayer) dithering.
+    Bayer,
 }
 
 /// Terminal encoder selection.

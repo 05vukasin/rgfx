@@ -1204,6 +1204,8 @@ dependencies = [
  "anyhow",
  "clap",
  "rgfx-core",
+ "rgfx-image",
+ "rgfx-terminal",
  "serde",
  "toml",
  "tracing",
