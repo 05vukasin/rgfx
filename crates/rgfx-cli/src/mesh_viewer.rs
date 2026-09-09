@@ -1,0 +1,681 @@
+//! The interactive 3D mesh viewer: load → auto-frame → orbit/render loop → encode → present.
+//!
+//! This is the flagship [`MediaViewer`](crate::dispatch::MediaViewer) (task 022). Like the
+//! still-image viewer it adds no rendering math of its own — it composes the sibling crates,
+//! honouring the one architectural law:
+//!
+//! 1. a loader from `rgfx-3d` ([`load_obj`](rgfx_3d::load_obj) / [`load_stl`](rgfx_3d::load_stl) /
+//!    [`load_gltf`](rgfx_3d::load_gltf), chosen by [`MeshFormat`]) turns the file into a
+//!    [`Scene`];
+//! 2. an [`OrbitController`] frames the model's bounding sphere and drives the camera;
+//! 3. the [`Rasterizer`] (a [`SceneRenderer`]) renders the [`Scene`] into a reused
+//!    [`Framebuffer`];
+//! 4. a [`BrailleEncoder`] turns that framebuffer into a [`TerminalFrame`], presented through the
+//!    diffing [`FrameEngine`] (interactive) or serialized to a file (`--output`).
+//!
+//! All camera and toggle state lives in a pure, TTY-free viewer state so the input → camera
+//! transitions and viewport/aspect recompute are unit-testable without a terminal.
+
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use anyhow::Context;
+use rgfx_3d::{OrbitController, Rasterizer, ShadingMode};
+use rgfx_core::{
+    BoundingSphere, Camera, Cell, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
+    TerminalFrame, Viewport,
+};
+use rgfx_terminal::{
+    BrailleEncoder, BrailleOptions, ColorMode, Event, FrameEngine, KeyCode, KeyEvent, SUBPIXEL_X,
+    SUBPIXEL_Y, detect_color_mode,
+};
+
+use crate::cli::Shading;
+use crate::config::Settings;
+use crate::dispatch::ViewRequest;
+use crate::media::{Input, MeshFormat};
+use crate::terminal::{Session, is_quit};
+
+/// Radians orbited per arrow-key press (~6.9°).
+const ORBIT_STEP: f32 = 0.12;
+/// Distance multiplier applied by a single zoom-in (`+`) press.
+const ZOOM_IN: f32 = 0.9;
+/// Distance multiplier applied by a single zoom-out (`-`) press.
+const ZOOM_OUT: f32 = 1.0 / ZOOM_IN;
+/// The smallest bounding radius used for clip-plane math, guarding degenerate (point) meshes.
+const MIN_RADIUS: f32 = 1e-4;
+/// Default render width in columns for non-interactive `--output` when no `--width` is given.
+const DEFAULT_OUTPUT_COLS: u16 = 80;
+/// How long the interactive loop blocks waiting for input. A static model never redraws on its
+/// own, so this only bounds shutdown latency; resize and key events wake the loop immediately.
+const POLL_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The filled shading modes cycled by the `S` key. Wireframe is a separate `W` toggle, and the
+/// `L` key forces the lit modes to [`ShadingMode::Unlit`] rather than being part of the cycle.
+const SHADING_CYCLE: [ShadingMode; 5] = [
+    ShadingMode::Flat,
+    ShadingMode::Smooth,
+    ShadingMode::Unlit,
+    ShadingMode::Normals,
+    ShadingMode::Depth,
+];
+
+/// The still human-readable renderer name shown in the status bar.
+const RENDERER_NAME: &str = "braille";
+
+/// Runs the 3D viewer for a request. Entry point called by the dispatch layer.
+pub fn view(request: &ViewRequest<'_>, format: MeshFormat) -> anyhow::Result<()> {
+    let path = match request.input {
+        Input::File(p) => p.as_path(),
+        Input::Stdin => {
+            anyhow::bail!("reading meshes from stdin is not supported (pass a file path)")
+        }
+    };
+    let scene = load_scene(path, format)?;
+
+    match &request.settings.output {
+        Some(out) => write_output(&scene, path, request.settings, out),
+        None => run_interactive(&scene, path, request.settings),
+    }
+}
+
+/// Loads a [`Scene`] with the loader matching `format`.
+fn load_scene(path: &Path, format: MeshFormat) -> anyhow::Result<Scene> {
+    match format {
+        MeshFormat::Obj => {
+            rgfx_3d::load_obj(path).with_context(|| format!("loading OBJ {}", path.display()))
+        }
+        MeshFormat::Stl => {
+            rgfx_3d::load_stl(path).with_context(|| format!("loading STL {}", path.display()))
+        }
+        MeshFormat::Gltf => {
+            rgfx_3d::load_gltf(path).with_context(|| format!("loading glTF {}", path.display()))
+        }
+    }
+}
+
+/// The bounding sphere of a scene, or an error when the scene carries no geometry.
+fn scene_sphere(scene: &Scene) -> anyhow::Result<BoundingSphere> {
+    Ok(scene
+        .bounding_box()
+        .context("mesh has no geometry to display")?
+        .bounding_sphere())
+}
+
+/// A short display name for the loaded file (its final path component), used in the status bar.
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// What a handled key press means for the render loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyAction {
+    /// Quit the viewer and restore the terminal.
+    Quit,
+    /// State changed; re-render on the next loop iteration.
+    Redraw,
+    /// Nothing actionable; keep idling without a redraw.
+    Ignore,
+}
+
+/// The pure, terminal-free state of the 3D viewer: the orbit camera plus the render toggles.
+///
+/// Every interaction ([`ViewerState::on_key`], [`ViewerState::set_aspect`]) mutates this state
+/// without touching a terminal, which is what makes the input → camera transitions and the
+/// viewport/aspect recompute unit-testable headlessly.
+pub(crate) struct ViewerState {
+    /// The orbit controller: target + spherical coordinates around it, and the reset home.
+    controls: OrbitController,
+    /// The camera the controller drives and the rasterizer renders through.
+    camera: Camera,
+    /// The model's bounding sphere, used for framing and near/far clip math.
+    sphere: BoundingSphere,
+    /// Index into [`SHADING_CYCLE`] selecting the current filled shading mode.
+    shading_index: usize,
+    /// Whether the mesh is drawn as a wireframe (overrides the filled shading).
+    wireframe: bool,
+    /// Whether ANSI color output is enabled (attaches per-cell foreground colors).
+    color: bool,
+    /// Whether directional lighting is applied to the lit shading modes.
+    lighting: bool,
+    /// Whether the status bar / key help overlay is shown.
+    show_ui: bool,
+}
+
+impl ViewerState {
+    /// Builds the initial state for `sphere`, framing it in `viewport` with the settings' field of
+    /// view, shading, wireframe, and color defaults.
+    pub(crate) fn new(sphere: BoundingSphere, settings: &Settings, viewport: Viewport) -> Self {
+        let aspect = viewport.aspect(SUBPIXEL_X, SUBPIXEL_Y).max(f32::EPSILON);
+        let mut camera = Camera::perspective(aspect, settings.fov_degrees.to_radians());
+        let mut controls = OrbitController::from_camera(&camera);
+        controls.auto_frame(&mut camera, &sphere, aspect);
+
+        let shading_index = cycle_index(shading_mode(settings.shading));
+        let mut state = Self {
+            controls,
+            camera,
+            sphere,
+            shading_index,
+            wireframe: settings.wireframe,
+            color: settings.color,
+            lighting: true,
+            show_ui: true,
+        };
+        state.update_clip();
+        state
+    }
+
+    /// The effective shading mode, resolving the wireframe and lighting toggles over the cycled
+    /// filled mode.
+    pub(crate) fn effective_shading(&self) -> ShadingMode {
+        if self.wireframe {
+            return ShadingMode::Wireframe;
+        }
+        let base = SHADING_CYCLE[self.shading_index];
+        if !self.lighting && matches!(base, ShadingMode::Flat | ShadingMode::Smooth) {
+            ShadingMode::Unlit
+        } else {
+            base
+        }
+    }
+
+    /// Applies a key press, updating the camera or toggles and reporting what the loop should do.
+    pub(crate) fn on_key(&mut self, key: KeyEvent) -> KeyAction {
+        if is_quit(key) {
+            return KeyAction::Quit;
+        }
+        match key.code {
+            KeyCode::Left => self.controls.orbit(-ORBIT_STEP, 0.0),
+            KeyCode::Right => self.controls.orbit(ORBIT_STEP, 0.0),
+            KeyCode::Up => self.controls.orbit(0.0, ORBIT_STEP),
+            KeyCode::Down => self.controls.orbit(0.0, -ORBIT_STEP),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.controls.zoom(ZOOM_IN),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.controls.zoom(ZOOM_OUT),
+            KeyCode::Char('r') | KeyCode::Char('R') => self.controls.reset(),
+            KeyCode::Char('w') | KeyCode::Char('W') => self.wireframe = !self.wireframe,
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.shading_index = (self.shading_index + 1) % SHADING_CYCLE.len();
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => self.color = !self.color,
+            KeyCode::Char('l') | KeyCode::Char('L') => self.lighting = !self.lighting,
+            KeyCode::Char('f') | KeyCode::Char('F') => self.show_ui = !self.show_ui,
+            _ => return KeyAction::Ignore,
+        }
+        KeyAction::Redraw
+    }
+
+    /// Recomputes the camera aspect for a new viewport (e.g. on resize), keeping the current orbit.
+    pub(crate) fn set_aspect(&mut self, viewport: Viewport) {
+        self.controls.sync(&mut self.camera);
+        self.camera.aspect = viewport.aspect(SUBPIXEL_X, SUBPIXEL_Y).max(f32::EPSILON);
+        self.update_clip();
+    }
+
+    /// Recomputes near/far clip planes to bracket the model at the current orbit distance, so
+    /// zooming never clips the model against the near plane.
+    fn update_clip(&mut self) {
+        let distance = self.controls.distance();
+        let radius = self.sphere.radius.max(MIN_RADIUS);
+        self.camera.near = (distance - radius).max(radius * 1e-3).max(MIN_RADIUS);
+        self.camera.far = (distance + radius).max(self.camera.near + MIN_RADIUS);
+    }
+
+    /// Builds the rasterizer for the current toggle state.
+    fn rasterizer(&self) -> Rasterizer {
+        let mut ras = Rasterizer::new(self.effective_shading());
+        // A soft blue-grey surface reads well both as grayscale luminance and, with `--color`, as a
+        // colored fill. Unlit/normals/depth ignore or override this.
+        ras.base_color = if self.color {
+            Color::rgb(0.55, 0.68, 0.92)
+        } else {
+            Color::WHITE
+        };
+        ras.clear_color = Color::TRANSPARENT;
+        ras
+    }
+
+    /// Renders the scene into `fb` (reused) and encodes it into a [`TerminalFrame`], optionally
+    /// overlaying the status bar.
+    fn render(
+        &mut self,
+        scene: &Scene,
+        viewport: Viewport,
+        fb: &mut Framebuffer,
+        encoder_color: ColorMode,
+        status: Option<&StatusInfo<'_>>,
+    ) -> anyhow::Result<TerminalFrame> {
+        let (pw, ph) = viewport.render_size(SUBPIXEL_X, SUBPIXEL_Y);
+        fb.resize(pw, ph);
+        self.set_aspect(viewport);
+
+        let mut ras = self.rasterizer();
+        ras.render(scene, &self.camera, fb)
+            .context("rendering mesh")?;
+
+        let color = if self.color {
+            encoder_color
+        } else {
+            ColorMode::None
+        };
+        let encoder = BrailleEncoder::with_options(BrailleOptions {
+            color,
+            ..BrailleOptions::default()
+        });
+        let mut frame = encoder.encode(fb, viewport);
+
+        if self.show_ui {
+            if let Some(info) = status {
+                self.overlay_status(&mut frame, info);
+            }
+        }
+        Ok(frame)
+    }
+
+    /// Draws the two-line status bar (info + key help) across the bottom rows of `frame`.
+    fn overlay_status(&self, frame: &mut TerminalFrame, info: &StatusInfo<'_>) {
+        let rows = frame.rows();
+        if rows == 0 || frame.cols() == 0 {
+            return;
+        }
+        let status = format!(
+            "{} | {} tris | {:.1} fps | {} | {}{}",
+            info.file,
+            info.triangles,
+            info.fps,
+            RENDERER_NAME,
+            shading_name(self.effective_shading()),
+            if self.color { " | color" } else { "" },
+        );
+        let help =
+            "arrows:orbit  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  F:ui  Q:quit";
+
+        if rows >= 2 {
+            write_line(frame, rows - 2, &status);
+        }
+        write_line(frame, rows - 1, help);
+    }
+}
+
+/// The dynamic status-bar inputs that are not part of [`ViewerState`].
+struct StatusInfo<'a> {
+    /// The displayed file name.
+    file: &'a str,
+    /// The scene's triangle count.
+    triangles: usize,
+    /// The most recent measured frames-per-second.
+    fps: f32,
+}
+
+/// Writes `text` (clipped to the frame width) into `row`, blanking the rest of the row so the
+/// overlaid line fully replaces the braille underneath.
+fn write_line(frame: &mut TerminalFrame, row: usize, text: &str) {
+    let cols = frame.cols();
+    if row >= frame.rows() || cols == 0 {
+        return;
+    }
+    let mut col = 0;
+    for ch in text.chars() {
+        if col >= cols {
+            break;
+        }
+        frame.set(col, row, Cell::glyph(ch));
+        col += 1;
+    }
+    while col < cols {
+        frame.set(col, row, Cell::glyph(' '));
+        col += 1;
+    }
+}
+
+/// The index of `mode` within [`SHADING_CYCLE`], or `0` when it is not a cycled mode.
+fn cycle_index(mode: ShadingMode) -> usize {
+    SHADING_CYCLE.iter().position(|&m| m == mode).unwrap_or(0)
+}
+
+/// Maps the CLI [`Shading`] enum onto the rasterizer's [`ShadingMode`].
+fn shading_mode(shading: Shading) -> ShadingMode {
+    match shading {
+        Shading::Unlit => ShadingMode::Unlit,
+        Shading::Flat => ShadingMode::Flat,
+        Shading::Smooth => ShadingMode::Smooth,
+        Shading::Normals => ShadingMode::Normals,
+        Shading::Depth => ShadingMode::Depth,
+    }
+}
+
+/// A short lower-case name for a shading mode, for the status bar.
+fn shading_name(mode: ShadingMode) -> &'static str {
+    match mode {
+        ShadingMode::Unlit => "unlit",
+        ShadingMode::Flat => "flat",
+        ShadingMode::Smooth => "smooth",
+        ShadingMode::Normals => "normals",
+        ShadingMode::Depth => "depth",
+        ShadingMode::Wireframe => "wireframe",
+        _ => "shaded",
+    }
+}
+
+/// The non-interactive `--output` viewport: a fixed width (from `--width` or the default) with a
+/// height chosen so the braille render field is roughly square.
+fn output_viewport(settings: &Settings) -> Viewport {
+    let cols = settings
+        .width
+        .unwrap_or(DEFAULT_OUTPUT_COLS as u32)
+        .clamp(1, u16::MAX as u32) as u16;
+    // cols*2 px wide, rows*4 px tall; rows = cols/2 makes the pixel field ~square.
+    let rows = (cols / 2).max(1);
+    Viewport::new(cols, rows)
+}
+
+/// Renders one frame of the scene to `out` as text (`--output`). Non-interactive: no terminal is
+/// entered, and no status overlay is drawn.
+fn write_output(scene: &Scene, path: &Path, settings: &Settings, out: &Path) -> anyhow::Result<()> {
+    let sphere = scene_sphere(scene)?;
+    let viewport = output_viewport(settings);
+    let mut state = ViewerState::new(sphere, settings, viewport);
+    let mut fb = Framebuffer::new(0, 0);
+    let color = if settings.color {
+        ColorMode::TrueColor
+    } else {
+        ColorMode::None
+    };
+    let frame = state.render(scene, viewport, &mut fb, color, None)?;
+    std::fs::write(out, frame.to_text())
+        .with_context(|| format!("writing output to {}", out.display()))?;
+    tracing::info!(path = %out.display(), file = %display_name(path), "wrote rendered mesh");
+    Ok(())
+}
+
+/// Runs the interactive viewer: auto-frame, then an event-driven orbit/render loop that redraws
+/// only on input or resize. The [`Session`] restores the terminal on every exit path.
+fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::Result<()> {
+    let sphere = scene_sphere(scene)?;
+    let file = display_name(path);
+    let triangles = scene.triangle_count();
+
+    let mut session = Session::open()?;
+    let mut engine = FrameEngine::new(detect_color_mode());
+    // One framebuffer, reused across every re-render (no per-frame allocation).
+    let mut fb = Framebuffer::new(0, 0);
+
+    let mut viewport = session.viewport()?;
+    let mut state = ViewerState::new(sphere, settings, viewport);
+    let mut dirty = true;
+    let mut fps = 0.0f32;
+
+    loop {
+        if dirty {
+            let started = Instant::now();
+            let info = StatusInfo {
+                file: &file,
+                triangles,
+                fps,
+            };
+            let frame = state.render(scene, viewport, &mut fb, engine.mode(), Some(&info))?;
+            session.render_frame(&mut engine, &frame)?;
+            let elapsed = started.elapsed().as_secs_f32();
+            if elapsed > 0.0 {
+                fps = 1.0 / elapsed;
+            }
+            dirty = false;
+        }
+
+        match session.poll_event(POLL_TIMEOUT)? {
+            Some(Event::Resize(cols, rows)) => {
+                viewport = Viewport::new(cols, rows);
+                state.set_aspect(viewport);
+                dirty = true;
+            }
+            Some(Event::Key(key)) => match state.on_key(key) {
+                KeyAction::Quit => break,
+                KeyAction::Redraw => dirty = true,
+                KeyAction::Ignore => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::RenderOpts;
+    use crate::config::Config;
+    use rgfx_core::{Mesh, Scene};
+    use rgfx_terminal::{KeyModifiers, braille_char};
+
+    /// The built-in cube as a single-mesh scene — a deterministic, always-available model.
+    fn cube_scene() -> Scene {
+        Scene::new("cube", vec![rgfx_3d::primitives::cube(1.0)])
+    }
+
+    fn settings(opts: RenderOpts) -> Settings {
+        Settings::resolve(&Config::default(), &opts)
+    }
+
+    fn state(viewport: Viewport) -> ViewerState {
+        let scene = cube_scene();
+        let sphere = scene_sphere(&scene).unwrap();
+        ViewerState::new(sphere, &settings(RenderOpts::default()), viewport)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Any non-blank cell (a lit braille glyph or overlaid text): proof the model was drawn.
+    fn has_visible_content(frame: &TerminalFrame) -> bool {
+        frame
+            .to_text()
+            .chars()
+            .any(|c| c != braille_char(0) && c != '\n' && c != ' ')
+    }
+
+    #[test]
+    fn renders_cube_to_a_deterministic_nonblank_frame() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(40, 20);
+        let mut s = state(viewport);
+        let mut fb = Framebuffer::new(0, 0);
+
+        let a = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap();
+        let b = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap();
+
+        // Deterministic: identical camera + scene → byte-identical output.
+        assert_eq!(a.to_text(), b.to_text());
+        assert_eq!((a.cols(), a.rows()), (40, 20));
+        assert!(has_visible_content(&a), "the cube silhouette must be drawn");
+    }
+
+    #[test]
+    fn renders_at_responsive_widths() {
+        let scene = cube_scene();
+        for cols in [100u16, 60, 30] {
+            let viewport = Viewport::new(cols, 24);
+            let mut s = state(viewport);
+            let mut fb = Framebuffer::new(0, 0);
+            let frame = s
+                .render(&scene, viewport, &mut fb, ColorMode::None, None)
+                .unwrap();
+            assert_eq!(frame.cols(), cols as usize);
+            assert!(
+                has_visible_content(&frame),
+                "cube must render at {cols} cols"
+            );
+        }
+    }
+
+    #[test]
+    fn arrow_keys_orbit_the_camera() {
+        let mut s = state(Viewport::new(40, 20));
+        let yaw0 = s.controls.yaw();
+        let pitch0 = s.controls.pitch();
+
+        assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
+        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
+
+        assert_eq!(s.on_key(key(KeyCode::Left)), KeyAction::Redraw);
+        assert!((s.controls.yaw() - yaw0).abs() < 1e-6);
+
+        s.on_key(key(KeyCode::Up));
+        assert!((s.controls.pitch() - (pitch0 + ORBIT_STEP)).abs() < 1e-6);
+        s.on_key(key(KeyCode::Down));
+        assert!((s.controls.pitch() - pitch0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zoom_and_reset_transitions() {
+        let mut s = state(Viewport::new(40, 20));
+        let home = s.controls.distance();
+
+        s.on_key(key(KeyCode::Char('+')));
+        assert!((s.controls.distance() - home * ZOOM_IN).abs() < 1e-5);
+        s.on_key(key(KeyCode::Char('-')));
+        assert!((s.controls.distance() - home * ZOOM_IN * ZOOM_OUT).abs() < 1e-5);
+
+        // Orbit + zoom away, then reset restores the framed home distance and orientation.
+        s.on_key(key(KeyCode::Right));
+        s.on_key(key(KeyCode::Char('+')));
+        assert_eq!(s.on_key(key(KeyCode::Char('r'))), KeyAction::Redraw);
+        assert!((s.controls.distance() - home).abs() < 1e-5);
+    }
+
+    #[test]
+    fn toggles_change_shading_color_lighting_and_ui() {
+        let mut s = state(Viewport::new(40, 20));
+
+        // Wireframe overrides the filled mode.
+        assert!(!s.wireframe);
+        s.on_key(key(KeyCode::Char('w')));
+        assert!(s.wireframe);
+        assert_eq!(s.effective_shading(), ShadingMode::Wireframe);
+        s.on_key(key(KeyCode::Char('w')));
+        assert!(!s.wireframe);
+
+        // Shading cycles through the filled modes.
+        let before = s.effective_shading();
+        s.on_key(key(KeyCode::Char('s')));
+        assert_ne!(s.effective_shading(), before);
+
+        // Lighting off forces lit modes to Unlit.
+        s.shading_index = cycle_index(ShadingMode::Flat);
+        assert_eq!(s.effective_shading(), ShadingMode::Flat);
+        s.on_key(key(KeyCode::Char('l')));
+        assert_eq!(s.effective_shading(), ShadingMode::Unlit);
+
+        // Color and UI toggle.
+        assert!(!s.color);
+        s.on_key(key(KeyCode::Char('c')));
+        assert!(s.color);
+        assert!(s.show_ui);
+        s.on_key(key(KeyCode::Char('f')));
+        assert!(!s.show_ui);
+    }
+
+    #[test]
+    fn wireframe_and_flat_produce_different_output() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(48, 24);
+        let mut fb = Framebuffer::new(0, 0);
+
+        let mut flat = state(viewport);
+        flat.shading_index = cycle_index(ShadingMode::Flat);
+        let flat_text = flat
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap()
+            .to_text();
+
+        let mut wire = state(viewport);
+        wire.wireframe = true;
+        let wire_text = wire
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap()
+            .to_text();
+
+        assert_ne!(flat_text, wire_text, "wireframe must differ from filled");
+    }
+
+    #[test]
+    fn color_mode_attaches_cell_foregrounds() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(40, 20);
+        let mut s = state(viewport);
+        s.color = true;
+        s.shading_index = cycle_index(ShadingMode::Unlit);
+        let mut fb = Framebuffer::new(0, 0);
+
+        let frame = s
+            .render(&scene, viewport, &mut fb, ColorMode::TrueColor, None)
+            .unwrap();
+        assert!(
+            frame.cells().iter().any(|c| c.fg.is_some()),
+            "color mode should attach at least one foreground color"
+        );
+    }
+
+    #[test]
+    fn resize_recomputes_camera_aspect_and_framebuffer() {
+        let scene = cube_scene();
+        let mut s = state(Viewport::new(80, 24));
+        let mut fb = Framebuffer::new(0, 0);
+
+        let viewport = Viewport::new(60, 20);
+        s.render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap();
+
+        // Framebuffer resized to the braille pixel size of the new viewport.
+        assert_eq!(fb.width(), 60 * SUBPIXEL_X as usize);
+        assert_eq!(fb.height(), 20 * SUBPIXEL_Y as usize);
+        // Camera aspect matches the new viewport's pixel aspect.
+        let expect = viewport.aspect(SUBPIXEL_X, SUBPIXEL_Y);
+        assert!((s.camera.aspect - expect).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quit_keys_report_quit() {
+        let mut s = state(Viewport::new(40, 20));
+        assert_eq!(s.on_key(key(KeyCode::Char('q'))), KeyAction::Quit);
+        assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Quit);
+        // Ctrl+C quits, but a plain 'c' is the color toggle, not a quit.
+        assert_eq!(
+            s.on_key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    ..KeyModifiers::NONE
+                },
+            }),
+            KeyAction::Quit
+        );
+        assert_eq!(s.on_key(key(KeyCode::Char('c'))), KeyAction::Redraw);
+    }
+
+    #[test]
+    fn empty_scene_is_a_clean_error() {
+        let empty = Scene::new("empty", vec![Mesh::default()]);
+        assert!(scene_sphere(&empty).is_err());
+    }
+
+    #[test]
+    fn output_viewport_uses_width_and_squareish_rows() {
+        let s = settings(RenderOpts {
+            width: Some(120),
+            ..RenderOpts::default()
+        });
+        assert_eq!(output_viewport(&s), Viewport::new(120, 60));
+        let d = settings(RenderOpts::default());
+        assert_eq!(output_viewport(&d), Viewport::new(80, 40));
+    }
+}

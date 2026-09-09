@@ -10,8 +10,8 @@
 
 use std::time::Duration;
 
-use rgfx_core::Viewport;
-use rgfx_terminal::{Event, KeyCode, KeyEvent, Terminal, TerminalOptions};
+use rgfx_core::{TerminalFrame, Viewport};
+use rgfx_terminal::{Event, FrameEngine, KeyCode, KeyEvent, Terminal, TerminalOptions};
 
 /// What a polled input event means for a viewer's render loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +77,28 @@ impl Session {
             Some(event) => signal_for(event),
             None => Signal::Idle,
         })
+    }
+
+    /// Waits up to `timeout` for the next raw input [`Event`], returning `None` on timeout.
+    ///
+    /// Unlike [`Session::wait`], this hands the full event to the caller so an interactive viewer
+    /// (e.g. the 3D viewer) can act on individual keys rather than the reduced [`Signal`] set.
+    pub fn poll_event(&mut self, timeout: Duration) -> anyhow::Result<Option<Event>> {
+        Ok(self.term.poll_event(timeout)?)
+    }
+
+    /// Presents `frame` through the caller-owned [`FrameEngine`], writing only the cells that
+    /// changed since the previous frame (a full redraw on the first frame or after a resize).
+    ///
+    /// The engine and its buffers are owned by the caller and reused across frames, so steady-state
+    /// rendering performs no per-frame allocation.
+    pub fn render_frame(
+        &mut self,
+        engine: &mut FrameEngine,
+        frame: &TerminalFrame,
+    ) -> anyhow::Result<()> {
+        engine.render(frame, self.term.writer_mut().get_mut())?;
+        Ok(())
     }
 }
 
