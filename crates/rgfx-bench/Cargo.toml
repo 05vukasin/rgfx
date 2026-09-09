@@ -1,0 +1,33 @@
+[package]
+name = "rgfx-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Criterion benchmarks and procedural mesh generators for the rgfx rendering pipeline"
+
+[dependencies]
+rgfx-core = { path = "../rgfx-core" }
+rgfx-3d = { path = "../rgfx-3d" }
+rgfx-terminal = { path = "../rgfx-terminal" }
+glam.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "transform"
+harness = false
+
+[[bench]]
+name = "rasterize"
+harness = false
+
+[[bench]]
+name = "braille"
+harness = false
+
+[[bench]]
+name = "frame"
+harness = false
