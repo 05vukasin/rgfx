@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod ascii;
+mod avatar;
 mod block;
 mod braille;
 mod clock;
@@ -29,12 +30,14 @@ mod terminal;
 mod writer;
 
 pub use ascii::{AsciiEncoder, AsciiOptions, DEFAULT_RAMP};
+pub use avatar::AvatarState;
 pub use block::{
     BlockEncoder, BlockOptions, DARK_SHADE, FULL_BLOCK, LEFT_HALF, LIGHT_SHADE, LOWER_HALF,
     MEDIUM_SHADE, RIGHT_HALF, SHADE_RAMP, UPPER_HALF,
 };
 pub use braille::{
     BRAILLE_BASE, BrailleEncoder, BrailleOptions, SUBPIXEL_X, SUBPIXEL_Y, braille_char,
+    braille_dots,
 };
 pub use clock::{Clock, FrameClock, FramePacing, SystemClock};
 pub use color::{

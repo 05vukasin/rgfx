@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod animation;
 mod camera;
 mod color;
 mod error;
@@ -20,6 +21,7 @@ mod geometry;
 mod terminal_frame;
 mod traits;
 
+pub use animation::{Animation, AnimationPlayer, Frame, LoopPolicy, Sprite};
 pub use camera::{Camera, Projection};
 pub use color::Color;
 pub use error::{Error, Result};
