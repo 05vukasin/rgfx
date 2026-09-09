@@ -16,7 +16,7 @@ authors = ["The rgfx authors"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
-glam = "0.30"
+glam = "0.33"
 image = "0.25"
 thiserror = "2"
 tobj = "4"
