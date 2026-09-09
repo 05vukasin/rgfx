@@ -1,16 +1,18 @@
-//! `rgfx-image`: still-image → [`rgfx_core::Framebuffer`] pipeline for PNG and JPEG.
+//! `rgfx-image`: image → [`rgfx_core::Framebuffer`] pipeline for PNG, JPEG,
+//! WebP, BMP, and animated GIF.
 //!
-//! This crate decodes a PNG or JPEG file into an in-memory RGBA image
-//! ([`DecodedImage`]), corrects its aspect ratio for a terminal's non-square
-//! pixels, resizes it with a high-quality filter, and writes it into an
-//! [`rgfx_core::Framebuffer`]. A single decoded image can also be exposed as a
-//! one-frame [`rgfx_core::FrameSource`] via [`ImageSource`].
+//! This crate decodes a still image (PNG/JPEG/WebP/BMP) into an in-memory RGBA
+//! image ([`DecodedImage`]), corrects its aspect ratio for a terminal's
+//! non-square pixels, resizes it with a high-quality filter, and writes it into
+//! an [`rgfx_core::Framebuffer`]. A single decoded image can be exposed as a
+//! one-frame [`rgfx_core::FrameSource`] via [`ImageSource`]; an animated GIF is
+//! exposed as a multi-frame source via [`GifSource`], which reuses the same
+//! render pipeline for every frame.
 //!
 //! It never touches the terminal or any encoder: everything converges on the
 //! framebuffer, per the rgfx architectural law. The image-quality stage —
 //! dithering ([`Dither`]) and tone controls ([`Tone`]), configured via
-//! [`Preprocess`] — runs here as an in-place framebuffer transform. Additional
-//! formats (WebP/BMP/GIF) live in sibling crates.
+//! [`Preprocess`] — runs here as an in-place framebuffer transform.
 //!
 //! # Aspect-ratio correction
 //!
@@ -37,12 +39,14 @@
 
 mod aspect;
 mod decode;
+mod gif;
 mod preprocess;
 mod render;
 mod source;
 
 pub use aspect::{fit_dimensions, pixel_aspect};
 pub use decode::DecodedImage;
+pub use gif::{GifLoop, GifSource};
 pub use preprocess::{BayerSize, Dither, Preprocess, Tone};
 pub use render::{RenderOptions, ResizeFilter};
 pub use source::ImageSource;
