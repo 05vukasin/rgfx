@@ -69,6 +69,20 @@ pub struct RenderOpts {
     #[arg(long, value_enum, value_name = "MODE")]
     pub shading: Option<Shading>,
 
+    /// Simplify (decimate) a 3D mesh on load by vertex clustering.
+    ///
+    /// A value in `(0, 1]` is a fraction of the mesh's current triangle count (e.g. `0.25` keeps
+    /// about a quarter of the triangles); a value greater than `1` is an absolute target triangle
+    /// count (e.g. `50000`). When omitted, heavy meshes are still auto-simplified above a budget
+    /// unless `--no-simplify` is given.
+    #[arg(long, value_name = "RATIO|TARGET")]
+    pub simplify: Option<f32>,
+
+    /// Disable mesh simplification entirely for this run, rendering the mesh at full detail
+    /// (overrides both `--simplify` and the automatic budget).
+    #[arg(long)]
+    pub no_simplify: bool,
+
     /// Enable ANSI color output (default is monochrome).
     #[arg(long)]
     pub color: bool,
@@ -267,6 +281,33 @@ mod tests {
             }
             other => panic!("expected info subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn simplify_ratio_flag_parses() {
+        let cli = parse(&["rgfx", "model.obj", "--simplify", "0.25"]);
+        assert_eq!(cli.render.simplify, Some(0.25));
+        assert!(!cli.render.no_simplify);
+    }
+
+    #[test]
+    fn simplify_absolute_target_flag_parses() {
+        let cli = parse(&["rgfx", "model.obj", "--simplify", "50000"]);
+        assert_eq!(cli.render.simplify, Some(50_000.0));
+    }
+
+    #[test]
+    fn no_simplify_flag_parses() {
+        let cli = parse(&["rgfx", "model.obj", "--no-simplify"]);
+        assert!(cli.render.no_simplify);
+        assert_eq!(cli.render.simplify, None);
+    }
+
+    #[test]
+    fn simplify_defaults_unset() {
+        let cli = parse(&["rgfx", "model.obj"]);
+        assert_eq!(cli.render.simplify, None);
+        assert!(!cli.render.no_simplify);
     }
 
     #[test]

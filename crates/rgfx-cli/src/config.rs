@@ -83,7 +83,18 @@ pub struct ThreeDConfig {
     pub wireframe: bool,
     /// Vertical field of view in degrees.
     pub fov_degrees: f32,
+    /// Whether heavy meshes are automatically simplified on load (vertex clustering). Disabled by
+    /// the `--no-simplify` flag for a single run; set `false` here to turn the default off entirely.
+    pub auto_simplify: bool,
+    /// Triangle budget that triggers (and becomes the target of) automatic simplification: a mesh
+    /// with more than this many triangles is decimated down to roughly this count on load.
+    pub simplify_budget: usize,
 }
+
+/// The default triangle budget above which meshes are auto-simplified on load. Chosen from the
+/// task's profiling: a ~4.7k-tri model renders in ~0.03 s, so well under this stays interactive,
+/// while the 705k-tri report is far above it.
+pub const DEFAULT_SIMPLIFY_BUDGET: usize = 150_000;
 
 impl Default for ThreeDConfig {
     fn default() -> Self {
@@ -91,6 +102,8 @@ impl Default for ThreeDConfig {
             shading: Shading::Flat,
             wireframe: false,
             fov_degrees: 45.0,
+            auto_simplify: true,
+            simplify_budget: DEFAULT_SIMPLIFY_BUDGET,
         }
     }
 }
@@ -185,6 +198,15 @@ pub struct Settings {
     pub output: Option<PathBuf>,
     /// Print still images inline like `cat` instead of the full-screen preview.
     pub cat: bool,
+    /// Explicit mesh-simplification request from `--simplify`: a ratio in `(0, 1]` of the current
+    /// triangle count, or an absolute target triangle count when `> 1`. `None` means "no explicit
+    /// request" (automatic simplification may still apply).
+    pub simplify: Option<f32>,
+    /// Whether automatic simplification of heavy meshes is enabled (config default, unless the run
+    /// passed `--no-simplify`).
+    pub auto_simplify: bool,
+    /// Triangle budget that triggers and targets automatic simplification.
+    pub simplify_budget: usize,
 }
 
 impl Settings {
@@ -211,6 +233,15 @@ impl Settings {
             threshold: config.image.threshold,
             output: opts.output.clone(),
             cat: opts.cat,
+            // `--no-simplify` overrides an explicit `--simplify` request too.
+            simplify: if opts.no_simplify {
+                None
+            } else {
+                opts.simplify
+            },
+            // `--no-simplify` turns the default off for this run; otherwise follow the config.
+            auto_simplify: config.three_d.auto_simplify && !opts.no_simplify,
+            simplify_budget: config.three_d.simplify_budget,
         }
     }
 }
@@ -265,6 +296,44 @@ mod tests {
     #[test]
     fn empty_toml_yields_defaults() {
         assert_eq!(Config::from_toml("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn simplify_defaults_and_resolution() {
+        let c = Config::default();
+        assert!(c.three_d.auto_simplify, "auto-simplify on by default");
+        assert_eq!(c.three_d.simplify_budget, DEFAULT_SIMPLIFY_BUDGET);
+
+        // Default resolve keeps auto on, no explicit request.
+        let s = Settings::resolve(&c, &RenderOpts::default());
+        assert!(s.auto_simplify);
+        assert_eq!(s.simplify, None);
+        assert_eq!(s.simplify_budget, DEFAULT_SIMPLIFY_BUDGET);
+
+        // --no-simplify turns auto off and clears an explicit request.
+        let s2 = Settings::resolve(
+            &c,
+            &RenderOpts {
+                simplify: Some(0.5),
+                no_simplify: true,
+                ..RenderOpts::default()
+            },
+        );
+        assert!(!s2.auto_simplify);
+        assert_eq!(s2.simplify, None);
+
+        // A config that disables auto still honors an explicit --simplify.
+        let c_off = Config::from_toml("[three_d]\nauto_simplify = false\n").unwrap();
+        assert!(!c_off.three_d.auto_simplify);
+        let s3 = Settings::resolve(
+            &c_off,
+            &RenderOpts {
+                simplify: Some(0.25),
+                ..RenderOpts::default()
+            },
+        );
+        assert!(!s3.auto_simplify);
+        assert_eq!(s3.simplify, Some(0.25));
     }
 
     #[test]
