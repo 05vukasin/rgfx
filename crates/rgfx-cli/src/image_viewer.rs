@@ -19,7 +19,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use rgfx_core::{Cell, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
+use rgfx_core::{Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 use rgfx_image::{BayerSize, DecodedImage, Dither, Preprocess, RenderOptions, Tone};
 use rgfx_terminal::{
     AsciiEncoder, AsciiOptions, BlockEncoder, BlockOptions, BrailleEncoder, BrailleOptions,
@@ -422,10 +422,6 @@ fn render_state(
 
 /// Draws the two-line options bar (mode info + key help) across the bottom rows of `frame`.
 fn overlay_image_status(frame: &mut TerminalFrame, image: &DecodedImage, state: &ImageState) {
-    let rows = frame.rows();
-    if rows == 0 || frame.cols() == 0 {
-        return;
-    }
     let status = format!(
         "{}x{} | {} | dither:{} | color:{} | invert:{}",
         image.width(),
@@ -436,10 +432,7 @@ fn overlay_image_status(frame: &mut TerminalFrame, image: &DecodedImage, state: 
         if state.invert { "on" } else { "off" },
     );
     let help = "R:renderer  D:dither  I:invert  C:color  F:ui  Q:quit";
-    if rows >= 2 {
-        write_line(frame, rows - 2, &status);
-    }
-    write_line(frame, rows - 1, help);
+    crate::viewer_chrome::overlay_bottom_bar(frame, &status, help);
 }
 
 /// A short human name for a dither mode, for the options bar.
@@ -451,27 +444,6 @@ fn dither_name(d: DitherMode) -> &'static str {
         DitherMode::Floyd => "floyd",
         DitherMode::Atkinson => "atkinson",
         DitherMode::Bayer => "bayer",
-    }
-}
-
-/// Writes `text` (clipped to the frame width) into `row`, blanking the rest so the overlaid line
-/// fully replaces the glyphs underneath.
-fn write_line(frame: &mut TerminalFrame, row: usize, text: &str) {
-    let cols = frame.cols();
-    if row >= frame.rows() || cols == 0 {
-        return;
-    }
-    let mut col = 0;
-    for ch in text.chars() {
-        if col >= cols {
-            break;
-        }
-        frame.set(col, row, Cell::glyph(ch));
-        col += 1;
-    }
-    while col < cols {
-        frame.set(col, row, Cell::glyph(' '));
-        col += 1;
     }
 }
 

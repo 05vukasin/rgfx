@@ -79,6 +79,6 @@ a PR against `main`. The integrator (you) merges.
 | 030 | responsive-inline-rendering | rgfx-terminal/rgfx-cli | 021 | ✅ |
 | 031 | 3d-viewer-improvements | rgfx-3d/rgfx-cli | 022 | ✅ |
 | 032 | fullscreen-image-preview | rgfx-cli | 021, 030, 007 | ✅ |
-| 033 | viewer-chrome-and-options-bar | rgfx-cli | 032, 023, 022 | ⬜ |
+| 033 | viewer-chrome-and-options-bar | rgfx-cli | 032, 023, 022 | ✅ |
 
 Keep this table in sync as tasks progress (or regenerate from the per-file Completion sections).

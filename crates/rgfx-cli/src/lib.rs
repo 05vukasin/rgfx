@@ -35,6 +35,7 @@ pub mod mesh_viewer;
 pub mod playback_viewer;
 pub mod stream;
 pub mod terminal;
+pub mod viewer_chrome;
 
 pub use app::run;
 pub use cli::Cli;

@@ -22,7 +22,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use rgfx_core::{Cell, FrameSource, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
+use rgfx_core::{FrameSource, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 use rgfx_image::{BayerSize, Dither, GifLoop, GifSource, Preprocess, RenderOptions, Tone};
 use rgfx_terminal::{
     AsciiEncoder, BlockEncoder, BrailleEncoder, ColorMode, Event, FrameEngine, KeyCode, KeyEvent,
@@ -512,6 +512,8 @@ pub(crate) struct PlaybackController<S: PlaybackSource> {
     paused: bool,
     /// The user's fps override (via `--fps` or `+/-`), or `None` to follow the source.
     override_fps: Option<f64>,
+    /// Whether the bottom options bar is shown (toggled with `F`).
+    show_ui: bool,
 }
 
 impl<S: PlaybackSource> PlaybackController<S> {
@@ -521,12 +523,18 @@ impl<S: PlaybackSource> PlaybackController<S> {
             source,
             paused: false,
             override_fps: initial_fps,
+            show_ui: true,
         }
     }
 
     /// Whether playback is currently paused.
     pub(crate) fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// Whether the bottom options bar is currently shown.
+    pub(crate) fn show_ui(&self) -> bool {
+        self.show_ui
     }
 
     /// The current effective target fps, if one is in force.
@@ -600,6 +608,10 @@ impl<S: PlaybackSource> PlaybackController<S> {
                 self.restart()?;
                 Ok(Outcome::Redraw)
             }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                self.show_ui = !self.show_ui;
+                Ok(Outcome::Redraw)
+            }
             KeyCode::Left => self.seek(false),
             KeyCode::Right => self.seek(true),
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -644,7 +656,7 @@ impl<S: PlaybackSource> PlaybackController<S> {
 // ---------------------------------------------------------------------------
 
 /// The two-line control help shown at the bottom of the frame.
-const HELP: &str = "space:pause  <-/->:seek  R:restart  +/-:fps  Q:quit";
+const HELP: &str = "space:pause  <-/->:seek  R:restart  +/-:fps  F:ui  Q:quit";
 
 /// Runs the interactive playback loop. `build` constructs the source for a given viewport, so the
 /// loop owns the terminal lifecycle and can rebuild the source on resize.
@@ -756,7 +768,9 @@ fn present<S: PlaybackSource>(
     controller: &PlaybackController<S>,
 ) -> anyhow::Result<()> {
     let mut frame = encoder.encode(fb, viewport);
-    overlay_status(&mut frame, controller);
+    if controller.show_ui() {
+        overlay_status(&mut frame, controller);
+    }
     session.render_frame(engine, &frame)?;
     Ok(())
 }
@@ -766,10 +780,6 @@ fn overlay_status<S: PlaybackSource>(
     frame: &mut TerminalFrame,
     controller: &PlaybackController<S>,
 ) {
-    let rows = frame.rows();
-    if rows == 0 || frame.cols() == 0 {
-        return;
-    }
     let paused = if controller.is_paused() {
         " | paused"
     } else {
@@ -780,30 +790,7 @@ fn overlay_status<S: PlaybackSource>(
         .map(|f| format!(" | {f:.0} fps"))
         .unwrap_or_default();
     let status = format!("{}{}{}", controller.status_line(), fps, paused);
-    if rows >= 2 {
-        write_line(frame, rows - 2, &status);
-    }
-    write_line(frame, rows - 1, HELP);
-}
-
-/// Writes `text` (clipped to the frame width) into `row`, blanking the rest of the row.
-fn write_line(frame: &mut TerminalFrame, row: usize, text: &str) {
-    let cols = frame.cols();
-    if row >= frame.rows() || cols == 0 {
-        return;
-    }
-    let mut col = 0;
-    for ch in text.chars() {
-        if col >= cols {
-            break;
-        }
-        frame.set(col, row, Cell::glyph(ch));
-        col += 1;
-    }
-    while col < cols {
-        frame.set(col, row, Cell::glyph(' '));
-        col += 1;
-    }
+    crate::viewer_chrome::overlay_bottom_bar(frame, &status, HELP);
 }
 
 /// Renders the first frame to `out` as text (`--output`). Non-interactive: no terminal is entered.
@@ -1138,6 +1125,16 @@ mod tests {
         let mut c = PlaybackController::new(MockSource::default(), None);
         assert_eq!(c.on_key(key(KeyCode::Esc)).unwrap(), Outcome::Quit);
         assert_eq!(c.on_key(key(KeyCode::Char('q'))).unwrap(), Outcome::Quit);
+    }
+
+    #[test]
+    fn f_toggles_the_options_bar() {
+        let mut c = PlaybackController::new(MockSource::default(), None);
+        assert!(c.show_ui(), "bar is shown by default");
+        assert_eq!(c.on_key(key(KeyCode::Char('f'))).unwrap(), Outcome::Redraw);
+        assert!(!c.show_ui(), "F hides the bar");
+        assert_eq!(c.on_key(key(KeyCode::Char('F'))).unwrap(), Outcome::Redraw);
+        assert!(c.show_ui(), "F shows it again");
     }
 
     #[test]
