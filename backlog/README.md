@@ -80,6 +80,6 @@ a PR against `main`. The integrator (you) merges.
 | 031 | 3d-viewer-improvements | rgfx-3d/rgfx-cli | 022 | ✅ |
 | 032 | fullscreen-image-preview | rgfx-cli | 021, 030, 007 | ✅ |
 | 033 | viewer-chrome-and-options-bar | rgfx-cli | 032, 023, 022 | ✅ |
-| 034 | raw-mode-full-redraw-carriage-return | rgfx-terminal | 007, 022, 032 | ⬜ |
+| 034 | raw-mode-full-redraw-carriage-return | rgfx-terminal | 007, 022, 032 | ✅ |
 
 Keep this table in sync as tasks progress (or regenerate from the per-file Completion sections).
