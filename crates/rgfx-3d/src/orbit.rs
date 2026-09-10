@@ -1,18 +1,23 @@
 //! An orbit camera controller layered on top of [`rgfx_core::Camera`].
 //!
-//! The controller stores the orbit *state* — a target point plus spherical coordinates (yaw,
-//! pitch, distance) around it — and offers the interactions an interactive 3D viewer needs:
-//! orbit, zoom (dolly), pan, reset, and automatic framing. It never renders; call
-//! [`OrbitController::sync`] to write the resulting position/target/up into a camera.
+//! The controller stores the orbit *state* — a target point, a free view *orientation* (a
+//! [`glam::Quat`]), and a distance — around it, and offers the interactions an interactive 3D
+//! viewer needs: orbit, roll, zoom (dolly), pan, reset, and automatic framing. It never renders;
+//! call [`OrbitController::sync`] to write the resulting position/target/up into a camera.
 //!
 //! # Coordinate convention
 //!
-//! The controller matches [`rgfx_core::Camera`]'s right-handed system. With yaw and pitch both
-//! zero the camera sits on the target's `+Z` axis looking toward `-Z`, exactly like a freshly
-//! constructed [`rgfx_core::Camera`]. Yaw rotates around world up (`+Y`); pitch tilts up and
-//! down and is clamped just short of the poles to avoid gimbal flip.
-
-use std::f32::consts::FRAC_PI_2;
+//! The controller matches [`rgfx_core::Camera`]'s right-handed system. With the identity
+//! orientation the camera sits on the target's `+Z` axis looking toward `-Z` with up `+Y`,
+//! exactly like a freshly constructed [`rgfx_core::Camera`].
+//!
+//! # Free (arcball) rotation
+//!
+//! Orientation is a quaternion rather than clamped Euler yaw/pitch, so the model tumbles freely
+//! in every direction with **no pole clamp and no gimbal lock**. [`OrbitController::orbit`]
+//! composes incremental rotations about the camera's *current* right and up axes, so dragging or
+//! arrowing always tumbles relative to what you see; [`OrbitController::roll`] composes a rotation
+//! about the current view axis. A full turn about any axis returns to the start orientation.
 
 use glam::{Quat, Vec3};
 use rgfx_core::{BoundingSphere, Camera, Projection};
@@ -24,18 +29,19 @@ use crate::framing::{
 /// The smallest orbit distance, keeping the camera from collapsing onto its target.
 const MIN_DISTANCE: f32 = 1e-3;
 
-/// How close pitch may approach the poles (±90°) before being clamped, avoiding a degenerate
-/// view basis where the view direction aligns with world up.
-const MAX_PITCH: f32 = FRAC_PI_2 - 1e-3;
+/// Builds the view orientation for a classic yaw/pitch pair, matching the legacy Euler
+/// convention: `+yaw` swings the camera toward `+X`, `+pitch` lifts it toward `+Y`. Used by
+/// [`OrbitController::from_camera`] and [`OrbitController::set_view`] to seed the quaternion.
+fn orientation_from_yaw_pitch(yaw: f32, pitch: f32) -> Quat {
+    (Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, -pitch)).normalize()
+}
 
 /// A snapshot of the orbit parameters, used to implement [`OrbitController::reset`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct OrbitState {
     target: Vec3,
-    yaw: f32,
-    pitch: f32,
+    orientation: Quat,
     distance: f32,
-    roll: f32,
 }
 
 /// An orbit camera controller operating on an [`rgfx_core::Camera`].
@@ -46,63 +52,56 @@ struct OrbitState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrbitController {
     target: Vec3,
-    yaw: f32,
-    pitch: f32,
+    /// The free view orientation. `orientation * +Z` is the unit direction from the target toward
+    /// the camera; `orientation * +Y` is the camera up. The identity looks down `-Z` with up `+Y`.
+    orientation: Quat,
     distance: f32,
-    /// Roll about the view axis, in radians. `0` keeps `up` upright.
+    /// A running odometer of applied roll (radians) about the view axis, for reporting only. The
+    /// authoritative roll lives inside `orientation`; this just tracks the net roll applied.
     roll: f32,
-    up: Vec3,
     home: OrbitState,
 }
 
 impl OrbitController {
     /// Creates a controller orbiting `target` at `distance`, starting on the target's `+Z`
-    /// axis (yaw = pitch = 0) with world up `+Y`.
+    /// axis (identity orientation) with world up `+Y`.
     pub fn new(target: Vec3, distance: f32) -> Self {
         let distance = distance.max(MIN_DISTANCE);
+        let orientation = Quat::IDENTITY;
         let home = OrbitState {
             target,
-            yaw: 0.0,
-            pitch: 0.0,
+            orientation,
             distance,
-            roll: 0.0,
         };
         Self {
             target,
-            yaw: 0.0,
-            pitch: 0.0,
+            orientation,
             distance,
             roll: 0.0,
-            up: Vec3::Y,
             home,
         }
     }
 
-    /// Derives orbit parameters (target, yaw, pitch, distance) from an existing camera so the
+    /// Derives orbit parameters (target, orientation, distance) from an existing camera so the
     /// controller can take over an already-positioned view without a visible jump.
     pub fn from_camera(camera: &Camera) -> Self {
         let offset = camera.position - camera.target;
         let distance = offset.length().max(MIN_DISTANCE);
+        // Recover the yaw/pitch that reproduce this offset direction, then build the orientation
+        // from them so `position()` round-trips the camera position.
         let pitch = (offset.y / distance).clamp(-1.0, 1.0).asin();
         let yaw = offset.x.atan2(offset.z);
+        let orientation = orientation_from_yaw_pitch(yaw, pitch);
         let home = OrbitState {
             target: camera.target,
-            yaw,
-            pitch,
+            orientation,
             distance,
-            roll: 0.0,
         };
         Self {
             target: camera.target,
-            yaw,
-            pitch,
+            orientation,
             distance,
             roll: 0.0,
-            up: if camera.up.length_squared() > f32::EPSILON {
-                camera.up.normalize()
-            } else {
-                Vec3::Y
-            },
             home,
         }
     }
@@ -117,21 +116,15 @@ impl OrbitController {
         self.distance
     }
 
-    /// The yaw angle in radians (rotation about world up).
-    pub fn yaw(&self) -> f32 {
-        self.yaw
-    }
-
-    /// The pitch angle in radians (tilt above/below the target's horizon plane).
-    pub fn pitch(&self) -> f32 {
-        self.pitch
+    /// The free view orientation as a quaternion (`orientation * +Z` points from the target toward
+    /// the camera; `orientation * +Y` is the camera up).
+    pub fn orientation(&self) -> Quat {
+        self.orientation
     }
 
     /// The unit direction from the target toward the camera.
     pub fn direction(&self) -> Vec3 {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
-        Vec3::new(cp * sy, sp, cp * cy)
+        self.orientation * Vec3::Z
     }
 
     /// The world-space camera position implied by the current orbit state.
@@ -139,47 +132,45 @@ impl OrbitController {
         self.target + self.direction() * self.distance
     }
 
-    /// Orbits the camera by `yaw_delta` and `pitch_delta` radians. Pitch is clamped just short
-    /// of the poles; yaw is free (adding a full turn returns to the same orientation).
-    pub fn orbit(&mut self, yaw_delta: f32, pitch_delta: f32) {
-        self.yaw += yaw_delta;
-        self.pitch = (self.pitch + pitch_delta).clamp(-MAX_PITCH, MAX_PITCH);
-    }
-
-    /// The roll angle in radians (rotation of the up vector about the view axis).
+    /// The net roll applied about the view axis, in radians (reporting odometer). `0` means the
+    /// view has not been rolled since the last reset.
     pub fn roll_angle(&self) -> f32 {
         self.roll
     }
 
+    /// Orbits the camera by `yaw_delta` and `pitch_delta` radians, composing incremental rotations
+    /// about the camera's **current** up and right axes. There is no pole clamp: pitch tumbles
+    /// freely over the top and bottom, and a full turn about either axis returns to the start.
+    pub fn orbit(&mut self, yaw_delta: f32, pitch_delta: f32) {
+        if !yaw_delta.is_finite() || !pitch_delta.is_finite() {
+            return;
+        }
+        // Post-multiplying by a base-frame rotation is equivalent to rotating about that axis
+        // *after* the current orientation — i.e. about the camera's current world-space axis.
+        // `+pitch` should lift the camera toward `+Y`, hence the negated X rotation.
+        let delta = Quat::from_axis_angle(Vec3::Y, yaw_delta)
+            * Quat::from_axis_angle(Vec3::X, -pitch_delta);
+        self.orientation = (self.orientation * delta).normalize();
+    }
+
     /// Rolls the view about the forward (view) axis by `delta` radians — the third rotation axis,
-    /// tilting the horizon. Yaw and pitch orbit the camera around the model; roll spins the camera
-    /// about the line of sight.
+    /// tilting the horizon. Yaw and pitch tumble the camera around the model; roll spins the camera
+    /// about the line of sight, composing into the orientation.
     pub fn roll(&mut self, delta: f32) {
         if delta.is_finite() {
+            self.orientation =
+                (self.orientation * Quat::from_axis_angle(Vec3::Z, delta)).normalize();
             self.roll += delta;
         }
     }
 
-    /// Sets the yaw/pitch orbit angles directly (radians, pitch clamped) and records them as the
-    /// reset home, so `reset` returns here. Used to establish a pleasant default 3/4 view after
-    /// [`OrbitController::auto_frame`].
+    /// Sets the view orientation from a yaw/pitch pair (radians, legacy Euler convention) and
+    /// records it as the reset home, so `reset` returns here. Used to establish a pleasant default
+    /// 3/4 view after [`OrbitController::auto_frame`]. Clears any accumulated roll.
     pub fn set_view(&mut self, yaw: f32, pitch: f32) {
-        self.yaw = yaw;
-        self.pitch = pitch.clamp(-MAX_PITCH, MAX_PITCH);
-        self.home.yaw = self.yaw;
-        self.home.pitch = self.pitch;
-    }
-
-    /// The camera up vector after applying roll about the view axis.
-    fn effective_up(&self) -> Vec3 {
-        if self.roll.abs() < f32::EPSILON {
-            return self.up;
-        }
-        let forward = (self.target - self.position()).normalize_or_zero();
-        if forward.length_squared() < f32::EPSILON {
-            return self.up;
-        }
-        (Quat::from_axis_angle(forward, self.roll) * self.up).normalize_or_zero()
+        self.orientation = orientation_from_yaw_pitch(yaw, pitch);
+        self.roll = 0.0;
+        self.home.orientation = self.orientation;
     }
 
     /// Zooms (dollies) by scaling the orbit distance. `scale < 1` moves closer, `scale > 1`
@@ -203,33 +194,25 @@ impl OrbitController {
     /// Pans the target within the camera's view plane by `dx` (right) and `dy` (up) world
     /// units. The camera position follows the target, so the view direction is preserved.
     pub fn pan(&mut self, dx: f32, dy: f32) {
-        // Camera looks from `position` toward `target`; forward = -direction.
-        let forward = -self.direction();
-        let right = forward.cross(self.up);
-        let right = if right.length_squared() > f32::EPSILON {
-            right.normalize()
-        } else {
-            Vec3::X
-        };
-        let up = right.cross(forward).normalize();
+        let right = self.orientation * Vec3::X;
+        let up = self.orientation * Vec3::Y;
         self.target += right * dx + up * dy;
     }
 
     /// Resets the orbit state to the values captured when the controller was created or last
-    /// framed via [`OrbitController::auto_frame`].
+    /// framed via [`OrbitController::auto_frame`] / [`OrbitController::set_view`].
     pub fn reset(&mut self) {
         self.target = self.home.target;
-        self.yaw = self.home.yaw;
-        self.pitch = self.home.pitch;
+        self.orientation = self.home.orientation;
         self.distance = self.home.distance;
-        self.roll = self.home.roll;
+        self.roll = 0.0;
     }
 
     /// Writes the current orbit state into `camera` (position, target, and up).
     pub fn sync(&self, camera: &mut Camera) {
         camera.position = self.position();
         camera.target = self.target;
-        camera.up = self.effective_up();
+        camera.up = self.orientation * Vec3::Y;
     }
 
     /// Frames `sphere` inside a viewport of the given `aspect`, keeping the current view
@@ -272,10 +255,8 @@ impl OrbitController {
 
         self.home = OrbitState {
             target: self.target,
-            yaw: self.yaw,
-            pitch: self.pitch,
+            orientation: self.orientation,
             distance: self.distance,
-            roll: self.roll,
         };
 
         self.sync(camera);
