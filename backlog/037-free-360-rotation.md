@@ -48,6 +48,19 @@ full freedom. No pole sticking.
 Performance / large-mesh handling (task 036).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [x] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ IMPLEMENTED (PR open)
+
+### Implementation notes
+`OrbitController` is now a quaternion arcball: a unit `glam::Quat` `orientation` (base frame
+right `+X` / up `+Y` / view `+Z` → world) plus `target`, `distance`, and a separate `roll`
+scalar. `orbit(yaw, pitch)` composes `Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-pitch)`
+onto the orientation in the local frame — rotation about the camera's current up/right axes, no
+clamp, no gimbal lock. `roll` is applied about the current view axis in `sync`, so it tilts the
+horizon without disturbing the tumble. `set_view` builds the orientation from spherical angles
+(so the default 3/4 view and `reset` home still work); `from_camera` builds it from the camera's
+offset/up basis. `yaw()`/`pitch()` are kept as best-effort derivations of the view direction.
+Camera up is derived from the same orientation, so it is always orthogonal to the view axis and
+the basis never degenerates at the poles. Viewer wiring is unchanged (arrows orbit, z/x roll,
+drag orbits) — just unrestricted now.

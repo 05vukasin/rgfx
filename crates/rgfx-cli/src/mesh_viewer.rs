@@ -757,20 +757,52 @@ mod tests {
 
     #[test]
     fn arrow_keys_orbit_the_camera() {
+        // The arcball tumbles freely, so assert on the view direction rather than Euler angles:
+        // each arrow reorients the camera, and an opposite arrow returns to the start.
         let mut s = state(Viewport::new(40, 20));
-        let yaw0 = s.controls.yaw();
-        let pitch0 = s.controls.pitch();
+        let dir0 = s.controls.direction();
 
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
-
+        assert!(
+            (s.controls.direction() - dir0).length() > 1e-4,
+            "Right reorients the camera"
+        );
         assert_eq!(s.on_key(key(KeyCode::Left)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - yaw0).abs() < 1e-6);
+        assert!(
+            (s.controls.direction() - dir0).length() < 1e-5,
+            "Left undoes Right"
+        );
 
         s.on_key(key(KeyCode::Up));
-        assert!((s.controls.pitch() - (pitch0 + ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.direction() - dir0).length() > 1e-4,
+            "Up reorients the camera"
+        );
         s.on_key(key(KeyCode::Down));
-        assert!((s.controls.pitch() - pitch0).abs() < 1e-6);
+        assert!(
+            (s.controls.direction() - dir0).length() < 1e-5,
+            "Down undoes Up"
+        );
+    }
+
+    #[test]
+    fn up_arrow_tumbles_past_the_old_pitch_clamp() {
+        // Regression (task 037): repeatedly pressing Up must roll the model over the top with no
+        // pole sticking. Under the old Euler clamp the camera Y component saturated below 1.0;
+        // now it sweeps through the pole and comes back down the far side.
+        let mut s = state(Viewport::new(40, 20));
+        let mut max_y: f32 = f32::MIN;
+        let mut min_y: f32 = f32::MAX;
+        // A full 2π of Up presses tumbles all the way around.
+        let presses = (std::f32::consts::TAU / ORBIT_STEP).ceil() as usize + 1;
+        for _ in 0..presses {
+            s.on_key(key(KeyCode::Up));
+            let y = s.controls.direction().y;
+            max_y = max_y.max(y);
+            min_y = min_y.min(y);
+        }
+        assert!(max_y > 0.99, "the view climbs over the top pole");
+        assert!(min_y < -0.99, "and continues past the bottom pole");
     }
 
     #[test]
@@ -1030,10 +1062,13 @@ mod tests {
         let mut s = state(Viewport::new(40, 20));
 
         // Closed: arrows orbit the camera; the light angles are untouched.
-        let yaw0 = s.controls.yaw();
+        let dir0 = s.controls.direction();
         let az0 = s.light.azimuth;
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.direction() - dir0).length() > 1e-4,
+            "closed menu: arrows orbit the camera"
+        );
         assert_eq!(s.light.azimuth, az0, "closed menu must not move the light");
 
         // `L` opens the modal menu.
@@ -1041,12 +1076,11 @@ mod tests {
         assert!(s.light.menu_open);
 
         // Open: arrows move the light; the camera orbit is frozen.
-        let yaw_frozen = s.controls.yaw();
+        let dir_frozen = s.controls.direction();
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
         assert!((s.light.azimuth - (az0 + LIGHT_ANGLE_STEP)).abs() < 1e-6);
-        assert_eq!(
-            s.controls.yaw(),
-            yaw_frozen,
+        assert!(
+            (s.controls.direction() - dir_frozen).length() < 1e-6,
             "camera must not orbit while the menu is open"
         );
         let el0 = s.light.elevation;
@@ -1056,9 +1090,12 @@ mod tests {
         // `Esc` closes; arrows orbit the camera again.
         assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Redraw);
         assert!(!s.light.menu_open);
-        let yaw_resumed = s.controls.yaw();
+        let dir_resumed = s.controls.direction();
         s.on_key(key(KeyCode::Left));
-        assert!((s.controls.yaw() - (yaw_resumed - ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.direction() - dir_resumed).length() > 1e-4,
+            "menu closed again: arrows resume orbiting"
+        );
     }
 
     #[test]

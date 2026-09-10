@@ -161,12 +161,70 @@ mod tests {
         assert!(approx(c.position(), before, EPS));
     }
 
+    /// The unit right/up/view axes of the controller's current orientation.
+    fn basis(c: &OrbitController) -> (Vec3, Vec3, Vec3) {
+        let q = c.orientation();
+        (q * Vec3::X, q * Vec3::Y, q * Vec3::Z)
+    }
+
     #[test]
-    fn pitch_is_clamped_short_of_the_pole() {
+    fn tumble_past_the_pole_keeps_a_finite_orthonormal_basis() {
+        // The arcball has no pitch clamp: an absurd upward tilt tumbles right over the top.
         let mut c = OrbitController::new(Vec3::ZERO, 1.0);
-        c.orbit(0.0, 100.0); // absurd upward tilt
-        assert!(c.pitch() < std::f32::consts::FRAC_PI_2);
-        // View basis must stay finite / non-degenerate.
+        c.orbit(0.0, 100.0);
+        assert!(c.position().is_finite());
+        assert!(c.direction().is_finite());
+        // Rotating up past ±90° would have flipped the old Euler basis; here the basis stays a
+        // finite, unit-length, mutually-orthogonal (right, up, view) frame.
+        let (right, up, view) = basis(&c);
+        for v in [right, up, view] {
+            assert!(v.is_finite());
+            assert!((v.length() - 1.0).abs() < EPS, "axis stays unit length");
+        }
+        assert!(
+            right.dot(up).abs() < EPS && up.dot(view).abs() < EPS && view.dot(right).abs() < EPS
+        );
+    }
+
+    #[test]
+    fn full_turn_of_pitch_returns_to_start() {
+        // Many small up-rotations summing to 2π return to the start orientation — proof there is
+        // no clamp and no gimbal lock at the poles.
+        let mut c = OrbitController::new(Vec3::new(0.3, -0.2, 0.1), 4.0);
+        c.set_view(0.5, 0.2); // start away from the identity
+        let start = c.position();
+        let (rx, ry, rz) = basis(&c);
+        let steps = 360;
+        let step = std::f32::consts::TAU / steps as f32;
+        for _ in 0..steps {
+            c.orbit(0.0, step); // pure "up" tumble
+        }
+        assert!(
+            approx(c.position(), start, 1e-3),
+            "2π of pitch returns to start"
+        );
+        let (ax, ay, az) = basis(&c);
+        assert!(approx(ax, rx, 1e-3) && approx(ay, ry, 1e-3) && approx(az, rz, 1e-3));
+    }
+
+    #[test]
+    fn up_then_right_reorients_past_ninety_degrees() {
+        // Rotate purely up past the old ±90° pitch limit, then purely right. The basis must stay
+        // orthonormal and finite, and the view must actually have moved past the pole.
+        let mut c = OrbitController::new(Vec3::ZERO, 2.0);
+        c.orbit(0.0, 2.0); // ~114° up — impossible under the old clamp
+        let (_, up_over_top, _) = basis(&c);
+        // Past the top the up axis has tipped below the horizon (its Y component is negative).
+        assert!(up_over_top.y < 0.0, "tumbled past the pole");
+        c.orbit(1.0, 0.0); // then swing right about the (now tilted) up axis
+        let (right, up, view) = basis(&c);
+        for v in [right, up, view] {
+            assert!(v.is_finite());
+            assert!((v.length() - 1.0).abs() < EPS);
+        }
+        assert!(
+            right.dot(up).abs() < EPS && up.dot(view).abs() < EPS && view.dot(right).abs() < EPS
+        );
         assert!(c.position().is_finite());
     }
 
