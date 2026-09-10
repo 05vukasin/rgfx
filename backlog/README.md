@@ -82,5 +82,8 @@ a PR against `main`. The integrator (you) merges.
 | 033 | viewer-chrome-and-options-bar | rgfx-cli | 032, 023, 022 | ✅ |
 | 034 | raw-mode-full-redraw-carriage-return | rgfx-terminal | 007, 022, 032 | ✅ |
 | 035 | light-controls-and-menu | rgfx-cli / rgfx-3d | 014, 022, 033 | ✅ |
+| 036 | large-mesh-performance | rgfx-3d / rgfx-cli | 013, 022, 015, 017 | ⬜ |
+| 037 | free-360-rotation | rgfx-3d / rgfx-cli | 011, 031, 022 | ⬜ |
+| 038 | gltf-animation-playback | rgfx-3d / rgfx-cli | 017, 022, 035 | ⬜ |
 
 Keep this table in sync as tasks progress (or regenerate from the per-file Completion sections).
