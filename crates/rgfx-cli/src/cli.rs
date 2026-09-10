@@ -73,6 +73,13 @@ pub struct RenderOpts {
     #[arg(long)]
     pub color: bool,
 
+    /// Color fidelity to seed the viewer with (`16`, `256`, or `true`).
+    ///
+    /// Only meaningful together with `--color`. The chosen fidelity is clamped to what the
+    /// terminal actually supports; an unset value defaults to the detected capability.
+    #[arg(long, value_enum, value_name = "MODE")]
+    pub color_mode: Option<ColorFidelity>,
+
     /// Dithering algorithm applied before a 1-bit (Braille) encoder thresholds the image.
     #[arg(long, value_enum, value_name = "MODE")]
     pub dither: Option<DitherMode>,
@@ -126,6 +133,26 @@ pub enum DitherMode {
     Atkinson,
     /// Ordered (4×4 Bayer) dithering.
     Bayer,
+}
+
+/// ANSI color fidelity for the interactive viewers.
+///
+/// The three non-`None` [`rgfx_terminal::ColorMode`] fidelities, surfaced as `--color-mode`
+/// values. The final mode is clamped to the terminal's detected capability at run time.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorFidelity {
+    /// The 16-color ANSI palette.
+    #[value(name = "16")]
+    #[serde(rename = "16")]
+    Ansi16,
+    /// The 256-color xterm palette.
+    #[value(name = "256")]
+    #[serde(rename = "256")]
+    Ansi256,
+    /// 24-bit truecolor.
+    #[value(name = "true")]
+    TrueColor,
 }
 
 /// Terminal encoder selection.
