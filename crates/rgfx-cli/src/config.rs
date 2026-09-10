@@ -83,6 +83,10 @@ pub struct ThreeDConfig {
     pub wireframe: bool,
     /// Vertical field of view in degrees.
     pub fov_degrees: f32,
+    /// Triangle budget above which a mesh is automatically simplified on load. A mesh with more
+    /// triangles than this is decimated to this count unless `--no-simplify` (or an explicit
+    /// `--simplify`) overrides it.
+    pub simplify_budget: usize,
 }
 
 impl Default for ThreeDConfig {
@@ -91,6 +95,7 @@ impl Default for ThreeDConfig {
             shading: Shading::Flat,
             wireframe: false,
             fov_degrees: 45.0,
+            simplify_budget: 150_000,
         }
     }
 }
@@ -168,6 +173,13 @@ pub struct Settings {
     pub wireframe: bool,
     /// Effective vertical field of view in degrees.
     pub fov_degrees: f32,
+    /// Explicit simplification request: a ratio in `(0,1)` or an absolute target triangle count
+    /// `>= 1`. `None` means "decide automatically from `simplify_budget`".
+    pub simplify: Option<f32>,
+    /// Force full detail, disabling both the explicit and automatic simplification.
+    pub no_simplify: bool,
+    /// Triangle budget above which a mesh auto-simplifies on load.
+    pub simplify_budget: usize,
     /// Loop video playback.
     pub loop_playback: bool,
     /// Effective dithering algorithm for the still-image viewer.
@@ -200,6 +212,9 @@ impl Settings {
             shading: opts.shading.unwrap_or(config.three_d.shading),
             wireframe: opts.wireframe || config.three_d.wireframe,
             fov_degrees: config.three_d.fov_degrees,
+            simplify: opts.simplify,
+            no_simplify: opts.no_simplify,
+            simplify_budget: config.three_d.simplify_budget,
             loop_playback: config.video.loop_playback,
             dither: opts.dither.unwrap_or(config.image.dither),
             gamma: opts.gamma.unwrap_or(config.image.gamma),
@@ -256,6 +271,33 @@ mod tests {
         assert_eq!(s2.dither, DitherMode::Atkinson);
         assert_eq!(s2.contrast, 1.5);
         assert_eq!(s2.gamma, 2.2);
+    }
+
+    #[test]
+    fn simplify_budget_defaults_and_overrides() {
+        let c = Config::default();
+        assert_eq!(c.three_d.simplify_budget, 150_000);
+
+        let cfg = Config::from_toml(
+            r#"
+                [three_d]
+                simplify_budget = 50000
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.three_d.simplify_budget, 50_000);
+
+        // The CLI simplify flags flow through to the resolved settings.
+        let s = Settings::resolve(
+            &cfg,
+            &RenderOpts {
+                simplify: Some(0.25),
+                ..RenderOpts::default()
+            },
+        );
+        assert_eq!(s.simplify, Some(0.25));
+        assert!(!s.no_simplify);
+        assert_eq!(s.simplify_budget, 50_000);
     }
 
     #[test]

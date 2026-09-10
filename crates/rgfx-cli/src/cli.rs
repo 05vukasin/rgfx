@@ -69,6 +69,16 @@ pub struct RenderOpts {
     #[arg(long, value_enum, value_name = "MODE")]
     pub shading: Option<Shading>,
 
+    /// Simplify large meshes before rendering. A value in `(0,1)` is a *ratio* of the original
+    /// triangle count (e.g. `0.25` keeps ~25%); a value `>= 1` is an absolute *target* triangle
+    /// count (e.g. `50000`). Overrides the automatic above-budget simplification.
+    #[arg(long, value_name = "RATIO|TARGET")]
+    pub simplify: Option<f32>,
+
+    /// Disable automatic mesh simplification, forcing full detail even on very large meshes.
+    #[arg(long, conflicts_with = "simplify")]
+    pub no_simplify: bool,
+
     /// Enable ANSI color output (default is monochrome).
     #[arg(long)]
     pub color: bool,
@@ -218,6 +228,27 @@ mod tests {
             cli.render.output.as_deref(),
             Some(std::path::Path::new("out.txt"))
         );
+    }
+
+    #[test]
+    fn simplify_flag_parses_ratio_and_target() {
+        let ratio = parse(&["rgfx", "model.obj", "--simplify", "0.25"]);
+        assert_eq!(ratio.render.simplify, Some(0.25));
+        assert!(!ratio.render.no_simplify);
+
+        let target = parse(&["rgfx", "model.obj", "--simplify", "50000"]);
+        assert_eq!(target.render.simplify, Some(50000.0));
+
+        let off = parse(&["rgfx", "model.obj", "--no-simplify"]);
+        assert!(off.render.no_simplify);
+        assert_eq!(off.render.simplify, None);
+    }
+
+    #[test]
+    fn simplify_and_no_simplify_conflict() {
+        // The two flags are mutually exclusive; supplying both is a parse error.
+        let err = Cli::try_parse_from(["rgfx", "m.obj", "--simplify", "0.5", "--no-simplify"]);
+        assert!(err.is_err(), "--simplify and --no-simplify must conflict");
     }
 
     #[test]

@@ -47,6 +47,15 @@ model renders in 0.03 s, so the problem is triangle count, not the pipeline per 
 GPU rendering. LOD streaming. Skinned-mesh handling. Quadric decimation (future upgrade).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + timing check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + timing check · [x] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW
+
+Implemented on `task/036-perf-a`: `rgfx_3d::simplify_scene` (vertex clustering, binary-searched grid
+resolution, deterministic, unit-tested); auto-simplify above a tunable budget (default 150k tris)
+with `--simplify <ratio|target>` / `--no-simplify` and a `simplified N→M tris` status line
+(`rgfx info` keeps original counts); and adaptive interaction resolution in the mesh viewer
+(reduced-res while orbiting/zooming, crisp full-res on idle). Measured on a generated 500k-tri mesh:
+full frame ≈139 ms vs simplified frame ≈51 ms (≈2.7× per-frame; 500k→149k tris, one-time simplify
+≈425 ms on load). Rayon tiled rasterization (optional lever 3) not landed — deferred to avoid
+z-buffer-race risk; noted for a follow-up.
