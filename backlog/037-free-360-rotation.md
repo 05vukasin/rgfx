@@ -48,6 +48,12 @@ full freedom. No pole sticking.
 Performance / large-mesh handling (task 036).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW
+
+Implemented as a quaternion arcball on branch `task/037-arcball-b`: `OrbitController` now stores
+a free `glam::Quat` orientation + target + distance. `orbit` composes incremental rotations about
+the camera's current right/up axes (no clamp), `roll` composes about the view axis, and `sync`
+derives `position = target + orientation*+Z*distance` and `up = orientation*+Y`. PTY smoke test
+confirms the cube tumbles a full turn over the top with no pole sticking.

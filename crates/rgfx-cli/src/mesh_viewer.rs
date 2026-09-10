@@ -758,19 +758,29 @@ mod tests {
     #[test]
     fn arrow_keys_orbit_the_camera() {
         let mut s = state(Viewport::new(40, 20));
-        let yaw0 = s.controls.yaw();
-        let pitch0 = s.controls.pitch();
+        let o0 = s.controls.orientation();
+        let p0 = s.controls.position();
 
+        // Right tumbles the view; the opposite arrow exactly cancels it (arcball composition).
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
-
+        assert_ne!(s.controls.orientation(), o0, "right orbits the camera");
         assert_eq!(s.on_key(key(KeyCode::Left)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - yaw0).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - p0).length() < 1e-5,
+            "left cancels right"
+        );
 
+        let p1 = s.controls.position();
         s.on_key(key(KeyCode::Up));
-        assert!((s.controls.pitch() - (pitch0 + ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - p1).length() > 1e-6,
+            "up tumbles the camera"
+        );
         s.on_key(key(KeyCode::Down));
-        assert!((s.controls.pitch() - pitch0).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - p1).length() < 1e-5,
+            "down cancels up"
+        );
     }
 
     #[test]
@@ -928,8 +938,16 @@ mod tests {
         // Regression (task 031): the model must load at a 3/4 view so it reads as 3D, rather than
         // the flat, dead-on (+Z) silhouette that looked like a "poorly loaded" blob.
         let s = state(Viewport::new(80, 24));
-        assert!((s.controls.yaw() - DEFAULT_YAW).abs() < 1e-6);
-        assert!((s.controls.pitch() - DEFAULT_PITCH).abs() < 1e-6);
+        let dir = s.controls.direction();
+        // A 3/4 view tilts off both axes (nonzero x and y), unlike a flat dead-on +Z silhouette.
+        assert!(
+            dir.x.abs() > 1e-3 && dir.y.abs() > 1e-3,
+            "default view must be an off-axis 3/4 angle"
+        );
+        // And it matches the configured default yaw/pitch.
+        let mut reference = OrbitController::new(Vec3::ZERO, 1.0);
+        reference.set_view(DEFAULT_YAW, DEFAULT_PITCH);
+        assert!((dir - reference.direction()).length() < 1e-5);
     }
 
     #[test]
@@ -1030,10 +1048,14 @@ mod tests {
         let mut s = state(Viewport::new(40, 20));
 
         // Closed: arrows orbit the camera; the light angles are untouched.
-        let yaw0 = s.controls.yaw();
+        let orient0 = s.controls.orientation();
         let az0 = s.light.azimuth;
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
+        assert_ne!(
+            s.controls.orientation(),
+            orient0,
+            "closed menu orbits camera"
+        );
         assert_eq!(s.light.azimuth, az0, "closed menu must not move the light");
 
         // `L` opens the modal menu.
@@ -1041,12 +1063,12 @@ mod tests {
         assert!(s.light.menu_open);
 
         // Open: arrows move the light; the camera orbit is frozen.
-        let yaw_frozen = s.controls.yaw();
+        let orient_frozen = s.controls.orientation();
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
         assert!((s.light.azimuth - (az0 + LIGHT_ANGLE_STEP)).abs() < 1e-6);
         assert_eq!(
-            s.controls.yaw(),
-            yaw_frozen,
+            s.controls.orientation(),
+            orient_frozen,
             "camera must not orbit while the menu is open"
         );
         let el0 = s.light.elevation;
@@ -1056,9 +1078,13 @@ mod tests {
         // `Esc` closes; arrows orbit the camera again.
         assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Redraw);
         assert!(!s.light.menu_open);
-        let yaw_resumed = s.controls.yaw();
+        let orient_resumed = s.controls.orientation();
         s.on_key(key(KeyCode::Left));
-        assert!((s.controls.yaw() - (yaw_resumed - ORBIT_STEP)).abs() < 1e-6);
+        assert_ne!(
+            s.controls.orientation(),
+            orient_resumed,
+            "camera orbits again after the menu closes"
+        );
     }
 
     #[test]

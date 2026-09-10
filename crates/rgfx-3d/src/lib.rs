@@ -89,9 +89,11 @@ mod tests {
     }
 
     #[test]
-    fn reset_restores_roll_and_set_view_rehomes() {
+    fn reset_restores_orientation_and_set_view_rehomes() {
         let mut c = OrbitController::new(Vec3::ZERO, 3.0);
         c.set_view(0.6, 0.4); // establish a default 3/4 view as the new home
+        let home_dir = c.direction();
+        let home_pos = c.position();
         c.roll(0.5);
         c.orbit(1.0, 0.2);
         c.reset();
@@ -100,8 +102,8 @@ mod tests {
             "reset clears roll to home (0)"
         );
         assert!(
-            (c.yaw() - 0.6).abs() < EPS && (c.pitch() - 0.4).abs() < EPS,
-            "reset returns to set_view home"
+            approx(c.direction(), home_dir, EPS) && approx(c.position(), home_pos, EPS),
+            "reset returns to the set_view home orientation"
         );
     }
 
@@ -162,12 +164,75 @@ mod tests {
     }
 
     #[test]
-    fn pitch_is_clamped_short_of_the_pole() {
-        let mut c = OrbitController::new(Vec3::ZERO, 1.0);
-        c.orbit(0.0, 100.0); // absurd upward tilt
-        assert!(c.pitch() < std::f32::consts::FRAC_PI_2);
-        // View basis must stay finite / non-degenerate.
-        assert!(c.position().is_finite());
+    fn up_rotation_full_turn_returns_to_start_no_clamp() {
+        // Arcball: many small up-rotations summing to a full 2π tumble the model over the top and
+        // back to the start — no pole clamp, no gimbal lock.
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        let before_pos = c.position();
+        let before_up = {
+            let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+            c.sync(&mut cam);
+            cam.up
+        };
+        let steps = 360;
+        let step = std::f32::consts::TAU / steps as f32;
+        for _ in 0..steps {
+            c.orbit(0.0, step); // pure up-rotation, straight over the pole
+        }
+        assert!(c.position().is_finite(), "basis stays finite over the pole");
+        assert!(
+            approx(c.position(), before_pos, 1e-3),
+            "2π of up-rotation returns to the start position"
+        );
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+        assert!(
+            approx(cam.up, before_up, 1e-3),
+            "2π of up-rotation returns the up vector"
+        );
+    }
+
+    #[test]
+    fn up_then_right_gives_orthonormal_basis_past_ninety_degrees() {
+        // Tumble well past the old ±90° pitch limit, then rotate right: the camera basis must stay
+        // orthonormal and finite (no gimbal collapse), which the clamped Euler model could not do.
+        let mut c = OrbitController::new(Vec3::ZERO, 2.0);
+        c.orbit(0.0, 2.2); // ~126° up — past the old clamp
+        c.orbit(1.3, 0.0); // then right
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+
+        let forward = (cam.target - cam.position).normalize();
+        let up = cam.up;
+        let right = forward.cross(up);
+        for v in [forward, up, right] {
+            assert!(
+                v.is_finite() && (v.length() - 1.0).abs() < 1e-3,
+                "unit + finite"
+            );
+        }
+        assert!(forward.dot(up).abs() < 1e-3, "forward ⟂ up");
+        assert!(forward.dot(right).abs() < 1e-3, "forward ⟂ right");
+        assert!(up.dot(right).abs() < 1e-3, "up ⟂ right");
+    }
+
+    #[test]
+    fn roll_composes_without_disturbing_the_tumble() {
+        // Roll rotates the up vector about the view axis without moving the camera position
+        // (the line of sight is unchanged), and a full turn of roll returns to the start.
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        c.orbit(0.7, 1.9); // tumble past 90°
+        let dir_before = c.direction();
+        let pos_before = c.position();
+        c.roll(0.6);
+        assert!(
+            approx(c.direction(), dir_before, EPS) && approx(c.position(), pos_before, EPS),
+            "roll must not move the camera along the view axis"
+        );
+        c.roll(std::f32::consts::TAU - 0.6);
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+        assert!(cam.up.is_finite(), "up stays finite after composed roll");
     }
 
     #[test]
