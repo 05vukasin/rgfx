@@ -58,6 +58,9 @@ pub struct Report {
     /// Declared animation count, for meshes that track animations (glTF).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub animations: Option<usize>,
+    /// Per-animation `name (duration)` labels, for meshes that track animations (glTF).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animation_clips: Vec<String>,
     /// Bounding-box size along each axis `[x, y, z]`, for meshes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounding_box: Option<[f32; 3]>,
@@ -91,6 +94,7 @@ impl Report {
             triangles: None,
             materials: None,
             animations: None,
+            animation_clips: Vec::new(),
             bounding_box: None,
             codec: None,
             fps: None,
@@ -129,6 +133,9 @@ impl Report {
         }
         if let Some(v) = self.animations {
             rows.push(("animations", v.to_string()));
+        }
+        for clip in &self.animation_clips {
+            rows.push(("animation", clip.clone()));
         }
         if let Some([x, y, z]) = self.bounding_box {
             rows.push(("bounding box", format!("{x:.3} x {y:.3} x {z:.3}")));
@@ -313,6 +320,7 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.triangles = Some(stats.triangle_count);
             report.materials = Some(stats.material_count);
             report.animations = Some(stats.animation_count);
+            report.animation_clips = animation_clips(&stats);
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
         MeshFormat::Blend => {
@@ -328,10 +336,21 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.triangles = Some(stats.triangle_count);
             report.materials = Some(stats.material_count);
             report.animations = Some(stats.animation_count);
+            report.animation_clips = animation_clips(&stats);
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
     }
     Ok(report)
+}
+
+/// Formats each declared animation as a `name (duration)` label for the report.
+fn animation_clips(stats: &rgfx_3d::GltfStats) -> Vec<String> {
+    stats
+        .animation_names
+        .iter()
+        .zip(stats.animation_durations.iter())
+        .map(|(name, dur)| format!("{name} ({dur:.2}s)"))
+        .collect()
 }
 
 /// The `[x, y, z]` extent of a bounding box.
@@ -449,6 +468,25 @@ f 4 8 5 1
         let human = report.to_human();
         assert!(human.contains("triangles"), "human output: {human}");
         assert!(human.contains("12"), "human output: {human}");
+    }
+
+    #[test]
+    fn animation_clips_render_name_and_duration() {
+        // A mesh report carrying animation clips lists each one in both human and JSON output.
+        let mut report = Report::new(&Input::File(std::path::PathBuf::from("walker.glb")), "mesh");
+        report.format = Some("glTF".to_string());
+        report.animations = Some(2);
+        report.animation_clips = vec!["walk (2.00s)".to_string(), "wave (1.00s)".to_string()];
+
+        let human = report.to_human();
+        assert!(human.contains("animations"), "human output: {human}");
+        assert!(human.contains("walk (2.00s)"), "human output: {human}");
+        assert!(human.contains("wave (1.00s)"), "human output: {human}");
+
+        // Round-trips through JSON with the clips intact.
+        let json = report.to_json().unwrap();
+        let back: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, report);
     }
 
     #[test]

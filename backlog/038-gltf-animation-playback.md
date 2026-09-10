@@ -55,6 +55,6 @@ crashing.
 Skeletal skinning, morph targets, animation blending, camera/light animation tracks.
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟨 IN REVIEW (branch `task/038-anim-a`)

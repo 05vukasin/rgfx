@@ -32,6 +32,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod anim;
 pub mod blend;
 mod framing;
 pub mod gltf;
@@ -44,12 +45,16 @@ mod raster;
 mod simplify;
 pub mod stl;
 
+pub use anim::{
+    AnimatedScene, Channel, Interpolation, MeshInstance, NodeTransform, SceneAnimation, SceneNode,
+    Track,
+};
 pub use blend::{blender_available, load_blend, load_blend_with_stats};
 pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
     perspective_fit_distance,
 };
-pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
+pub use gltf::{GltfStats, load_gltf, load_gltf_animated, load_gltf_with_stats};
 pub use light::direction_from_azimuth_elevation;
 pub use line::draw_line;
 pub use obj::{ObjStats, load_obj};
