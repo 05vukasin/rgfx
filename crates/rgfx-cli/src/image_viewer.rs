@@ -19,15 +19,18 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use rgfx_core::{Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
+use rgfx_core::{Cell, Framebuffer, TerminalEncoder, TerminalFrame, Viewport};
 use rgfx_image::{BayerSize, DecodedImage, Dither, Preprocess, RenderOptions, Tone};
-use rgfx_terminal::{AsciiEncoder, BlockEncoder, BrailleEncoder, terminal_size};
+use rgfx_terminal::{
+    AsciiEncoder, AsciiOptions, BlockEncoder, BlockOptions, BrailleEncoder, BrailleOptions,
+    ColorMode, Event, FrameEngine, KeyCode, KeyEvent, detect_color_mode, terminal_size,
+};
 
 use crate::cli::{DitherMode, Renderer};
 use crate::config::Settings;
 use crate::dispatch::{MediaViewer, ViewRequest};
 use crate::media::Input;
-use crate::terminal::{Session, Signal};
+use crate::terminal::Session;
 
 /// How long the interactive loop blocks on input between checks. A still image never redraws on
 /// its own, so this only bounds shutdown latency; resize events wake the loop immediately.
@@ -64,8 +67,8 @@ impl MediaViewer for ImageViewer {
 pub(crate) fn view_decoded(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
     match &settings.output {
         Some(out) => write_output(image, settings, out),
-        None if settings.interactive => run_interactive(image, settings),
-        None => run_inline(image, settings),
+        None if settings.cat => run_inline(image, settings),
+        None => run_fullscreen(image, settings),
     }
 }
 
@@ -276,23 +279,231 @@ fn run_inline(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
 ///
 /// The [`Session`] owns the terminal's raw/alternate-screen state and restores it on every exit
 /// path (normal quit, error, or panic), so quitting always leaves the terminal usable.
-fn run_interactive(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
+/// What a key press means to the full-screen image preview loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageAction {
+    Quit,
+    Redraw,
+    Ignore,
+}
+
+/// The interactive state of the full-screen image preview: the active encoder, dithering, and
+/// toggles, plus the base tone carried over from the CLI/config.
+struct ImageState {
+    renderer: ResolvedRenderer,
+    dither: DitherMode,
+    invert: bool,
+    color: bool,
+    gamma: f32,
+    contrast: f32,
+    threshold: f32,
+    show_ui: bool,
+}
+
+impl ImageState {
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            renderer: ResolvedRenderer::resolve(settings.renderer, settings.color),
+            dither: settings.dither,
+            invert: false,
+            color: settings.color,
+            gamma: settings.gamma,
+            contrast: settings.contrast,
+            threshold: settings.threshold,
+            show_ui: true,
+        }
+    }
+
+    fn cycle_renderer(&mut self) {
+        self.renderer = match self.renderer {
+            ResolvedRenderer::Braille => ResolvedRenderer::Ascii,
+            ResolvedRenderer::Ascii => ResolvedRenderer::Blocks,
+            ResolvedRenderer::Blocks => ResolvedRenderer::Braille,
+        };
+    }
+
+    fn cycle_dither(&mut self) {
+        self.dither = match self.dither {
+            DitherMode::Auto => DitherMode::None,
+            DitherMode::None => DitherMode::Floyd,
+            DitherMode::Floyd => DitherMode::Atkinson,
+            DitherMode::Atkinson => DitherMode::Bayer,
+            DitherMode::Bayer => DitherMode::Threshold,
+            DitherMode::Threshold => DitherMode::Auto,
+        };
+    }
+
+    fn on_key(&mut self, key: KeyEvent) -> ImageAction {
+        if crate::terminal::is_quit(key) {
+            return ImageAction::Quit;
+        }
+        match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => self.cycle_renderer(),
+            KeyCode::Char('d') | KeyCode::Char('D') => self.cycle_dither(),
+            KeyCode::Char('i') | KeyCode::Char('I') => self.invert = !self.invert,
+            KeyCode::Char('c') | KeyCode::Char('C') => self.color = !self.color,
+            KeyCode::Char('f') | KeyCode::Char('F') => self.show_ui = !self.show_ui,
+            _ => return ImageAction::Ignore,
+        }
+        ImageAction::Redraw
+    }
+
+    /// The preprocessing (tone + dithering) for the current state.
+    fn preprocess(&self) -> Preprocess {
+        Preprocess {
+            tone: Tone {
+                gamma: self.gamma,
+                contrast: self.contrast,
+                brightness: 0.0,
+                sharpen: None,
+            },
+            dither: resolve_dither(self.dither, self.renderer),
+            threshold: self.threshold,
+        }
+    }
+
+    /// The encoder for the current state; `engine_mode` is the terminal's color capability used
+    /// when color output is enabled (otherwise the encoder stays grayscale).
+    fn encoder(&self, engine_mode: ColorMode) -> Box<dyn TerminalEncoder> {
+        let color = if self.color {
+            engine_mode
+        } else {
+            ColorMode::None
+        };
+        match self.renderer {
+            ResolvedRenderer::Braille => Box::new(BrailleEncoder::with_options(BrailleOptions {
+                invert: self.invert,
+                gamma: self.gamma,
+                contrast: self.contrast,
+                color,
+                ..BrailleOptions::default()
+            })),
+            ResolvedRenderer::Ascii => Box::new(AsciiEncoder::with_options(AsciiOptions {
+                invert: self.invert,
+                gamma: self.gamma,
+                color,
+                ..AsciiOptions::default()
+            })),
+            ResolvedRenderer::Blocks => Box::new(BlockEncoder::with_options(BlockOptions {
+                invert: self.invert,
+                color,
+                ..BlockOptions::default()
+            })),
+        }
+    }
+
+    fn renderer_name(&self) -> &'static str {
+        match self.renderer {
+            ResolvedRenderer::Braille => "braille",
+            ResolvedRenderer::Ascii => "ascii",
+            ResolvedRenderer::Blocks => "blocks",
+        }
+    }
+}
+
+/// Renders `image` for the current `state` into a `bounds`-sized [`TerminalFrame`], letterboxed
+/// aspect-correct by the image pipeline, then overlays the options bar on the bottom rows.
+fn render_state(
+    image: &DecodedImage,
+    state: &ImageState,
+    bounds: Viewport,
+    engine_mode: ColorMode,
+    fb: &mut Framebuffer,
+) -> TerminalFrame {
+    let mut opts = state.renderer.render_options();
+    opts.preprocess = state.preprocess();
+    image.render_into(fb, bounds, &opts);
+    let mut frame = state.encoder(engine_mode).encode(fb, bounds);
+    if state.show_ui {
+        overlay_image_status(&mut frame, image, state);
+    }
+    frame
+}
+
+/// Draws the two-line options bar (mode info + key help) across the bottom rows of `frame`.
+fn overlay_image_status(frame: &mut TerminalFrame, image: &DecodedImage, state: &ImageState) {
+    let rows = frame.rows();
+    if rows == 0 || frame.cols() == 0 {
+        return;
+    }
+    let status = format!(
+        "{}x{} | {} | dither:{} | color:{} | invert:{}",
+        image.width(),
+        image.height(),
+        state.renderer_name(),
+        dither_name(state.dither),
+        if state.color { "on" } else { "off" },
+        if state.invert { "on" } else { "off" },
+    );
+    let help = "R:renderer  D:dither  I:invert  C:color  F:ui  Q:quit";
+    if rows >= 2 {
+        write_line(frame, rows - 2, &status);
+    }
+    write_line(frame, rows - 1, help);
+}
+
+/// A short human name for a dither mode, for the options bar.
+fn dither_name(d: DitherMode) -> &'static str {
+    match d {
+        DitherMode::Auto => "auto",
+        DitherMode::None => "none",
+        DitherMode::Threshold => "threshold",
+        DitherMode::Floyd => "floyd",
+        DitherMode::Atkinson => "atkinson",
+        DitherMode::Bayer => "bayer",
+    }
+}
+
+/// Writes `text` (clipped to the frame width) into `row`, blanking the rest so the overlaid line
+/// fully replaces the glyphs underneath.
+fn write_line(frame: &mut TerminalFrame, row: usize, text: &str) {
+    let cols = frame.cols();
+    if row >= frame.rows() || cols == 0 {
+        return;
+    }
+    let mut col = 0;
+    for ch in text.chars() {
+        if col >= cols {
+            break;
+        }
+        frame.set(col, row, Cell::glyph(ch));
+        col += 1;
+    }
+    while col < cols {
+        frame.set(col, row, Cell::glyph(' '));
+        col += 1;
+    }
+}
+
+/// Opens the full-screen image preview: enters the alternate screen, renders the image
+/// fit-to-terminal with a bottom options bar, and re-renders on resize or a control key. The
+/// [`Session`] restores the terminal on every exit path.
+fn run_fullscreen(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
     let mut session = Session::open()?;
-    // One framebuffer, reused across every re-render (no per-frame allocation).
+    let engine_mode = detect_color_mode();
+    let mut engine = FrameEngine::new(engine_mode);
     let mut fb = Framebuffer::new(0, 0);
+    let mut state = ImageState::from_settings(settings);
+    let mut viewport = session.viewport()?;
     let mut dirty = true;
 
     loop {
         if dirty {
-            let bounds = session.viewport()?;
-            let frame = render_frame(image, settings, Some(bounds), &mut fb);
-            session.present(&frame.to_text())?;
+            let frame = render_state(image, &state, viewport, engine_mode, &mut fb);
+            session.render_frame(&mut engine, &frame)?;
             dirty = false;
         }
-        match session.wait(POLL_TIMEOUT)? {
-            Signal::Quit => break,
-            Signal::Redraw => dirty = true,
-            Signal::Idle => {}
+        match session.poll_event(POLL_TIMEOUT)? {
+            Some(Event::Resize(cols, rows)) => {
+                viewport = Viewport::new(cols, rows);
+                dirty = true;
+            }
+            Some(Event::Key(key)) => match state.on_key(key) {
+                ImageAction::Quit => break,
+                ImageAction::Redraw => dirty = true,
+                ImageAction::Ignore => {}
+            },
+            _ => {}
         }
     }
     Ok(())
@@ -311,6 +522,13 @@ mod tests {
 
     fn settings(opts: RenderOpts) -> Settings {
         Settings::resolve(&Config::default(), &opts)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: rgfx_terminal::KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -334,15 +552,45 @@ mod tests {
     }
 
     #[test]
-    fn a_still_image_is_inline_by_default() {
-        // Regression (task 030): the default must be inline print-and-return, not the
-        // full-screen interactive viewer. `--interactive` opts back in.
-        let s = settings(RenderOpts::default());
-        assert!(
-            !s.interactive,
-            "still images must default to inline, not interactive"
-        );
-        assert!(s.output.is_none());
+    fn still_image_defaults_to_fullscreen_and_cat_opts_out() {
+        // Task 032: the default is now the full-screen preview; `-c`/`--cat` opts into the
+        // inline print-and-return behavior (task 030's run_inline).
+        let default = settings(RenderOpts::default());
+        assert!(!default.cat, "default is full-screen, not cat/inline");
+        assert!(default.output.is_none());
+        let cat = settings(RenderOpts {
+            cat: true,
+            ..RenderOpts::default()
+        });
+        assert!(cat.cat, "--cat selects inline output");
+    }
+
+    #[test]
+    fn image_controls_cycle_renderer_dither_and_toggles() {
+        let mut st = ImageState::from_settings(&settings(RenderOpts::default()));
+        let start = st.renderer;
+        assert_eq!(st.on_key(key(KeyCode::Char('r'))), ImageAction::Redraw);
+        assert_ne!(st.renderer, start, "R cycles the renderer");
+        assert_eq!(st.on_key(key(KeyCode::Char('i'))), ImageAction::Redraw);
+        assert!(st.invert, "I toggles invert");
+        let d = st.dither;
+        assert_eq!(st.on_key(key(KeyCode::Char('d'))), ImageAction::Redraw);
+        assert_ne!(st.dither, d, "D cycles dither");
+        assert_eq!(st.on_key(key(KeyCode::Char('f'))), ImageAction::Redraw);
+        assert!(!st.show_ui, "F toggles the options bar");
+        assert_eq!(st.on_key(key(KeyCode::Char('q'))), ImageAction::Quit);
+    }
+
+    #[test]
+    fn fullscreen_render_fills_viewport_and_overlays_bar() {
+        let img = red_pixel();
+        let st = ImageState::from_settings(&settings(RenderOpts::default()));
+        let mut fb = Framebuffer::new(0, 0);
+        let frame = render_state(&img, &st, Viewport::new(80, 12), ColorMode::None, &mut fb);
+        assert_eq!(frame.cols(), 80);
+        assert_eq!(frame.rows(), 12);
+        // The bottom row is the key-help line (fits at 80 cols), not blank braille.
+        assert!(frame.to_text().lines().last().unwrap().contains("Q:quit"));
     }
 
     #[test]
