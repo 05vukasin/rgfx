@@ -52,6 +52,6 @@ fidelity control, and re-render live.
 Palette editing, custom LUTs, dithering-in-color specifics (existing dither still applies to luma).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟨 IN REVIEW (PR open)

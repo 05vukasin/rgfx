@@ -11,9 +11,12 @@
 //! 3. the frame is either written to the terminal (interactive, event-driven, re-rendering on
 //!    resize) or, with `--output`, serialized to a file via [`TerminalFrame::to_text`].
 //!
-//! Colour (`--color`) is intentionally not wired here: ANSI colour lands in a later task. The
-//! renderer resolution already picks the half-block encoder for `--color` (its per-subpixel
-//! colour is the future seam), but every encoder used today is grayscale.
+//! Colour: the full-screen preview has a modal **color menu** (`C`) that turns ANSI colour on and
+//! picks a fidelity ([`ColorMode`]). The chosen mode is clamped to the terminal's detected
+//! capability and wired into both the encoder options and the [`FrameEngine`]'s serializer mode
+//! (rebuilding the engine on a change forces a clean full redraw). With colour off the grayscale
+//! path is byte-identical to before. The non-interactive `--output`/text path stays grayscale:
+//! [`TerminalFrame::to_text`] emits glyphs only, so that export is deterministic regardless.
 
 use std::path::Path;
 use std::time::Duration;
@@ -26,7 +29,7 @@ use rgfx_terminal::{
     ColorMode, Event, FrameEngine, KeyCode, KeyEvent, detect_color_mode, terminal_size,
 };
 
-use crate::cli::{DitherMode, Renderer};
+use crate::cli::{ColorDepth, DitherMode, Renderer};
 use crate::config::Settings;
 use crate::dispatch::{MediaViewer, ViewRequest};
 use crate::media::Input;
@@ -279,6 +282,119 @@ fn run_inline(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
 ///
 /// The [`Session`] owns the terminal's raw/alternate-screen state and restores it on every exit
 /// path (normal quit, error, or panic), so quitting always leaves the terminal usable.
+/// Contrast delta applied per `+`/`-` press inside the color menu (reuses the tone stage).
+const CONTRAST_STEP: f32 = 0.1;
+/// The clamp range for interactively-adjusted contrast, keeping it sane and non-negative.
+const CONTRAST_RANGE: (f32, f32) = (0.1, 4.0);
+
+/// The fidelity rank of a [`ColorMode`], used to clamp a requested mode down to a capability.
+///
+/// Ordered `None < Ansi16 < Ansi256 < TrueColor`, so a larger rank means richer color.
+fn color_rank(mode: ColorMode) -> u8 {
+    match mode {
+        ColorMode::None => 0,
+        ColorMode::Ansi16 => 1,
+        ColorMode::Ansi256 => 2,
+        ColorMode::TrueColor => 3,
+    }
+}
+
+/// Clamps a `requested` color mode down to the terminal's detected `capability`.
+///
+/// Requesting a richer mode than the terminal supports (e.g. TrueColor on a 16-color `TERM`)
+/// yields the capability, so no unsupported escapes are ever emitted; a request at or below the
+/// capability passes through unchanged.
+fn clamp_color_mode(requested: ColorMode, capability: ColorMode) -> ColorMode {
+    if color_rank(requested) > color_rank(capability) {
+        capability
+    } else {
+        requested
+    }
+}
+
+/// A short lower-case name for a color mode, for the status bar and menu.
+fn color_mode_name(mode: ColorMode) -> &'static str {
+    match mode {
+        ColorMode::None => "off",
+        ColorMode::Ansi16 => "ansi16",
+        ColorMode::Ansi256 => "ansi256",
+        ColorMode::TrueColor => "truecolor",
+    }
+}
+
+/// Maps the CLI [`ColorDepth`] seed onto a requested [`ColorMode`].
+fn depth_to_mode(depth: ColorDepth) -> ColorMode {
+    match depth {
+        ColorDepth::Ansi16 => ColorMode::Ansi16,
+        ColorDepth::Ansi256 => ColorMode::Ansi256,
+        ColorDepth::True => ColorMode::TrueColor,
+    }
+}
+
+/// The viewer-side color model for the full-screen image preview: whether ANSI color is on, the
+/// requested fidelity, and whether the modal color menu is open. Pure state with no terminal
+/// dependency, so the menu's key routing and the capability clamp are unit-testable headlessly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ColorMenu {
+    /// Whether ANSI color output is enabled (the quick on/off, now inside the menu).
+    on: bool,
+    /// The requested color fidelity (always one of the three colored modes). The effective mode is
+    /// this clamped to the terminal capability at render time.
+    mode: ColorMode,
+    /// Whether the modal color menu is open (captures input while true).
+    menu_open: bool,
+}
+
+impl ColorMenu {
+    /// The default color model: off, truecolor requested (clamped down at render), menu closed.
+    fn new() -> Self {
+        Self {
+            on: false,
+            mode: ColorMode::TrueColor,
+            menu_open: false,
+        }
+    }
+
+    /// Seeds the color model from the CLI/config: `--color` sets it on, `--color-mode` seeds the
+    /// requested fidelity (defaulting to truecolor, which clamps down to the terminal at render).
+    fn from_settings(settings: &Settings) -> Self {
+        Self {
+            on: settings.color,
+            mode: settings
+                .color_mode
+                .map_or(ColorMode::TrueColor, depth_to_mode),
+            menu_open: false,
+        }
+    }
+
+    /// Restores the color model to its defaults, leaving the menu open/closed as it was.
+    fn reset(&mut self) {
+        let menu_open = self.menu_open;
+        *self = Self::new();
+        self.menu_open = menu_open;
+    }
+
+    /// Cycles the requested fidelity: Ansi16 → Ansi256 → TrueColor → Ansi16.
+    fn cycle_mode(&mut self) {
+        self.mode = match self.mode {
+            ColorMode::Ansi16 => ColorMode::Ansi256,
+            ColorMode::Ansi256 => ColorMode::TrueColor,
+            // TrueColor wraps back to Ansi16; None is not a requestable state, treat it as the start.
+            ColorMode::TrueColor | ColorMode::None => ColorMode::Ansi16,
+        };
+    }
+
+    /// The effective color mode handed to the encoder and the [`FrameEngine`]: [`ColorMode::None`]
+    /// when color is off, otherwise the requested mode clamped to the terminal `capability`.
+    fn effective_mode(&self, capability: ColorMode) -> ColorMode {
+        if self.on {
+            clamp_color_mode(self.mode, capability)
+        } else {
+            ColorMode::None
+        }
+    }
+}
+
 /// What a key press means to the full-screen image preview loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageAction {
@@ -293,7 +409,8 @@ struct ImageState {
     renderer: ResolvedRenderer,
     dither: DitherMode,
     invert: bool,
-    color: bool,
+    /// The modal color model (on/off, requested fidelity, menu open).
+    color: ColorMenu,
     gamma: f32,
     contrast: f32,
     threshold: f32,
@@ -306,12 +423,24 @@ impl ImageState {
             renderer: ResolvedRenderer::resolve(settings.renderer, settings.color),
             dither: settings.dither,
             invert: false,
-            color: settings.color,
+            color: ColorMenu::from_settings(settings),
             gamma: settings.gamma,
             contrast: settings.contrast,
             threshold: settings.threshold,
             show_ui: true,
         }
+    }
+
+    /// The effective color mode for the current state and terminal `capability`, wired identically
+    /// into the encoder and the [`FrameEngine`].
+    fn effective_color(&self, capability: ColorMode) -> ColorMode {
+        self.color.effective_mode(capability)
+    }
+
+    /// Adjusts contrast by `delta`, clamped to [`CONTRAST_RANGE`].
+    fn adjust_contrast(&mut self, delta: f32) {
+        let (lo, hi) = CONTRAST_RANGE;
+        self.contrast = (self.contrast + delta).clamp(lo, hi);
     }
 
     fn cycle_renderer(&mut self) {
@@ -334,6 +463,11 @@ impl ImageState {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> ImageAction {
+        // While the color menu is open it captures input: it routes color/tone keys and Esc/C
+        // close it. The camera-less image controls (R/D/I/F) are suspended until it closes.
+        if self.color.menu_open {
+            return self.on_menu_key(key);
+        }
         if crate::terminal::is_quit(key) {
             return ImageAction::Quit;
         }
@@ -341,8 +475,36 @@ impl ImageState {
             KeyCode::Char('r') | KeyCode::Char('R') => self.cycle_renderer(),
             KeyCode::Char('d') | KeyCode::Char('D') => self.cycle_dither(),
             KeyCode::Char('i') | KeyCode::Char('I') => self.invert = !self.invert,
-            KeyCode::Char('c') | KeyCode::Char('C') => self.color = !self.color,
+            KeyCode::Char('c') | KeyCode::Char('C') => self.color.menu_open = true,
             KeyCode::Char('f') | KeyCode::Char('F') => self.show_ui = !self.show_ui,
+            _ => return ImageAction::Ignore,
+        }
+        ImageAction::Redraw
+    }
+
+    /// Routes a key while the color menu is open. `Ctrl+C` still quits; `Esc`/`C` close the menu;
+    /// the remaining keys drive color and the shared tone/renderer stages. Returns the loop action.
+    fn on_menu_key(&mut self, key: KeyEvent) -> ImageAction {
+        // Ctrl+C always quits, even out of the modal menu.
+        if key.modifiers.ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            return ImageAction::Quit;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.color.menu_open = false;
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char(' ') => {
+                self.color.on = !self.color.on;
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => self.color.cycle_mode(),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_contrast(CONTRAST_STEP),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_contrast(-CONTRAST_STEP),
+            // Quick-pick the blocks renderer for the richest fg/bg color (two colors per cell).
+            KeyCode::Char('b') | KeyCode::Char('B') => self.renderer = ResolvedRenderer::Blocks,
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.color.reset();
+                self.contrast = 1.0;
+            }
             _ => return ImageAction::Ignore,
         }
         ImageAction::Redraw
@@ -362,14 +524,10 @@ impl ImageState {
         }
     }
 
-    /// The encoder for the current state; `engine_mode` is the terminal's color capability used
-    /// when color output is enabled (otherwise the encoder stays grayscale).
-    fn encoder(&self, engine_mode: ColorMode) -> Box<dyn TerminalEncoder> {
-        let color = if self.color {
-            engine_mode
-        } else {
-            ColorMode::None
-        };
+    /// The encoder for the current state at the given effective `color` mode. The mode is already
+    /// clamped and gated by on/off (see [`ColorMenu::effective_mode`]); [`ColorMode::None`] keeps
+    /// the encoder grayscale, matching the same mode the [`FrameEngine`] serializes at.
+    fn encoder(&self, color: ColorMode) -> Box<dyn TerminalEncoder> {
         match self.renderer {
             ResolvedRenderer::Braille => Box::new(BrailleEncoder::with_options(BrailleOptions {
                 invert: self.invert,
@@ -402,37 +560,72 @@ impl ImageState {
 }
 
 /// Renders `image` for the current `state` into a `bounds`-sized [`TerminalFrame`], letterboxed
-/// aspect-correct by the image pipeline, then overlays the options bar on the bottom rows.
+/// aspect-correct by the image pipeline, then overlays the options bar and (when open) the color
+/// menu. `effective` is the color mode wired into the encoder — the same mode the caller's
+/// [`FrameEngine`] serializes at; `capability` is the terminal's detected max (shown in the menu).
 fn render_state(
     image: &DecodedImage,
     state: &ImageState,
     bounds: Viewport,
-    engine_mode: ColorMode,
+    effective: ColorMode,
+    capability: ColorMode,
     fb: &mut Framebuffer,
 ) -> TerminalFrame {
     let mut opts = state.renderer.render_options();
     opts.preprocess = state.preprocess();
     image.render_into(fb, bounds, &opts);
-    let mut frame = state.encoder(engine_mode).encode(fb, bounds);
+    let mut frame = state.encoder(effective).encode(fb, bounds);
     if state.show_ui {
-        overlay_image_status(&mut frame, image, state);
+        overlay_image_status(&mut frame, image, state, effective);
+    }
+    // The modal color menu draws over everything (even with the status bar hidden) since the user
+    // explicitly opened it.
+    if state.color.menu_open {
+        overlay_color_menu(&mut frame, state, capability);
     }
     frame
 }
 
 /// Draws the two-line options bar (mode info + key help) across the bottom rows of `frame`.
-fn overlay_image_status(frame: &mut TerminalFrame, image: &DecodedImage, state: &ImageState) {
+/// `effective` is the color mode actually rendered (`off` when disabled or clamped away).
+fn overlay_image_status(
+    frame: &mut TerminalFrame,
+    image: &DecodedImage,
+    state: &ImageState,
+    effective: ColorMode,
+) {
     let status = format!(
         "{}x{} | {} | dither:{} | color:{} | invert:{}",
         image.width(),
         image.height(),
         state.renderer_name(),
         dither_name(state.dither),
-        if state.color { "on" } else { "off" },
+        color_mode_name(effective),
         if state.invert { "on" } else { "off" },
     );
-    let help = "R:renderer  D:dither  I:invert  C:color  F:ui  Q:quit";
+    let help = "R:renderer  D:dither  I:invert  C:color-menu  F:ui  Q:quit";
     crate::viewer_chrome::overlay_bottom_bar(frame, &status, help);
+}
+
+/// Draws the modal color-menu panel (on/off, requested + effective mode, terminal max, renderer,
+/// contrast, and key help) floating near the top-left of `frame`.
+fn overlay_color_menu(frame: &mut TerminalFrame, state: &ImageState, capability: ColorMode) {
+    let c = &state.color;
+    let effective = c.effective_mode(capability);
+    let lines = vec![
+        "Color menu".to_string(),
+        format!("color:     {}", if c.on { "on" } else { "off" }),
+        format!("mode:      {}", color_mode_name(c.mode)),
+        format!("shown:     {}", color_mode_name(effective)),
+        format!("max:       {}", color_mode_name(capability)),
+        format!("renderer:  {}", state.renderer_name()),
+        format!("contrast:  {:.2}", state.contrast),
+        String::new(),
+        "O/Space on/off   M mode".to_string(),
+        "B blocks   +/- contrast".to_string(),
+        "R reset   Esc/C close".to_string(),
+    ];
+    crate::viewer_chrome::overlay_panel(frame, 1, 1, &lines);
 }
 
 /// A short human name for a dither mode, for the options bar.
@@ -452,16 +645,25 @@ fn dither_name(d: DitherMode) -> &'static str {
 /// [`Session`] restores the terminal on every exit path.
 fn run_fullscreen(image: &DecodedImage, settings: &Settings) -> anyhow::Result<()> {
     let mut session = Session::open()?;
-    let engine_mode = detect_color_mode();
-    let mut engine = FrameEngine::new(engine_mode);
-    let mut fb = Framebuffer::new(0, 0);
+    // The terminal's detected color capability: the ceiling every requested mode is clamped to.
+    let capability = detect_color_mode();
     let mut state = ImageState::from_settings(settings);
+    // The engine's serializer mode must match the encoder's color mode. Build it at the current
+    // effective mode; when the menu changes that mode we rebuild the engine (below), which resets
+    // its buffers and forces a clean full redraw so stale escapes never linger.
+    let mut engine = FrameEngine::new(state.effective_color(capability));
+    let mut fb = Framebuffer::new(0, 0);
     let mut viewport = session.viewport()?;
     let mut dirty = true;
 
     loop {
         if dirty {
-            let frame = render_state(image, &state, viewport, engine_mode, &mut fb);
+            let effective = state.effective_color(capability);
+            if engine.mode() != effective {
+                // Rebuilding drops the front buffer, so the next render is a full redraw.
+                engine = FrameEngine::new(effective);
+            }
+            let frame = render_state(image, &state, viewport, effective, capability, &mut fb);
             session.render_frame(&mut engine, &frame)?;
             dirty = false;
         }
@@ -558,11 +760,248 @@ mod tests {
         let img = red_pixel();
         let st = ImageState::from_settings(&settings(RenderOpts::default()));
         let mut fb = Framebuffer::new(0, 0);
-        let frame = render_state(&img, &st, Viewport::new(80, 12), ColorMode::None, &mut fb);
+        let frame = render_state(
+            &img,
+            &st,
+            Viewport::new(80, 12),
+            ColorMode::None,
+            ColorMode::None,
+            &mut fb,
+        );
         assert_eq!(frame.cols(), 80);
         assert_eq!(frame.rows(), 12);
         // The bottom row is the key-help line (fits at 80 cols), not blank braille.
         assert!(frame.to_text().lines().last().unwrap().contains("Q:quit"));
+    }
+
+    #[test]
+    fn c_opens_color_menu_and_routes_keys_then_closes() {
+        let mut st = ImageState::from_settings(&settings(RenderOpts::default()));
+        assert!(!st.color.menu_open);
+        assert!(
+            !st.color.on,
+            "default is color off (byte-identical grayscale)"
+        );
+
+        // C opens the menu (does not toggle color directly).
+        assert_eq!(st.on_key(key(KeyCode::Char('c'))), ImageAction::Redraw);
+        assert!(st.color.menu_open, "C opens the modal color menu");
+        assert!(!st.color.on, "opening the menu must not toggle color on");
+
+        // While open, O toggles color on, M cycles fidelity, B picks the blocks renderer.
+        assert_eq!(st.on_key(key(KeyCode::Char('o'))), ImageAction::Redraw);
+        assert!(st.color.on, "O turns color on inside the menu");
+        let m0 = st.color.mode;
+        assert_eq!(st.on_key(key(KeyCode::Char('m'))), ImageAction::Redraw);
+        assert_ne!(st.color.mode, m0, "M cycles the requested fidelity");
+        assert_eq!(st.on_key(key(KeyCode::Char('b'))), ImageAction::Redraw);
+        assert_eq!(
+            st.renderer,
+            ResolvedRenderer::Blocks,
+            "B quick-picks blocks"
+        );
+
+        // +/- adjust contrast (the shared tone stage).
+        let c0 = st.contrast;
+        assert_eq!(st.on_key(key(KeyCode::Char('+'))), ImageAction::Redraw);
+        assert!(st.contrast > c0, "+ raises contrast");
+        assert_eq!(st.on_key(key(KeyCode::Char('-'))), ImageAction::Redraw);
+        assert!((st.contrast - c0).abs() < 1e-6, "- returns contrast");
+
+        // C closes it again; controls resume.
+        assert_eq!(st.on_key(key(KeyCode::Char('c'))), ImageAction::Redraw);
+        assert!(!st.color.menu_open, "C closes the menu");
+    }
+
+    #[test]
+    fn closed_menu_leaves_image_controls_and_menu_captures_them() {
+        let mut st = ImageState::from_settings(&settings(RenderOpts::default()));
+        // Closed: R cycles the renderer as before.
+        let start = st.renderer;
+        assert_eq!(st.on_key(key(KeyCode::Char('r'))), ImageAction::Redraw);
+        assert_ne!(
+            st.renderer, start,
+            "R cycles the renderer while the menu is closed"
+        );
+
+        // Open the menu; now R is the in-menu reset, not the renderer cycle.
+        st.on_key(key(KeyCode::Char('c')));
+        st.on_key(key(KeyCode::Char('o'))); // color on
+        st.on_key(key(KeyCode::Char('m'))); // change fidelity away from default
+        st.contrast = 2.0;
+        let before = st.renderer;
+        assert_eq!(st.on_key(key(KeyCode::Char('r'))), ImageAction::Redraw);
+        assert_eq!(
+            st.renderer, before,
+            "R inside the menu does not cycle the renderer"
+        );
+        assert!(!st.color.on, "R resets color to its defaults (off)");
+        assert_eq!(
+            st.color.mode,
+            ColorMode::TrueColor,
+            "R resets the requested fidelity"
+        );
+        assert!(
+            (st.contrast - 1.0).abs() < 1e-6,
+            "R resets contrast to identity"
+        );
+        assert!(st.color.menu_open, "reset keeps the menu open");
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_inside_the_menu() {
+        let mut st = ImageState::from_settings(&settings(RenderOpts::default()));
+        st.on_key(key(KeyCode::Char('c'))); // open
+        let ctrl_c = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: rgfx_terminal::KeyModifiers {
+                ctrl: true,
+                ..rgfx_terminal::KeyModifiers::NONE
+            },
+        };
+        assert_eq!(st.on_key(ctrl_c), ImageAction::Quit);
+    }
+
+    #[test]
+    fn effective_mode_is_off_when_disabled_and_clamped_when_on() {
+        let mut c = ColorMenu::new();
+        // Off → None regardless of the requested mode or capability.
+        c.mode = ColorMode::TrueColor;
+        assert_eq!(c.effective_mode(ColorMode::TrueColor), ColorMode::None);
+        // On, requesting more than the terminal supports → clamped down to the capability.
+        c.on = true;
+        assert_eq!(c.effective_mode(ColorMode::Ansi16), ColorMode::Ansi16);
+        assert_eq!(c.effective_mode(ColorMode::Ansi256), ColorMode::Ansi256);
+        assert_eq!(c.effective_mode(ColorMode::TrueColor), ColorMode::TrueColor);
+        // A request at or below the capability passes through.
+        c.mode = ColorMode::Ansi16;
+        assert_eq!(c.effective_mode(ColorMode::TrueColor), ColorMode::Ansi16);
+    }
+
+    #[test]
+    fn color_mode_seeds_from_cli_flags() {
+        // --color --color-mode 256 seeds the menu on at Ansi256.
+        let s = settings(RenderOpts {
+            color: true,
+            color_mode: Some(crate::cli::ColorDepth::Ansi256),
+            ..RenderOpts::default()
+        });
+        let st = ImageState::from_settings(&s);
+        assert!(st.color.on);
+        assert_eq!(st.color.mode, ColorMode::Ansi256);
+        // Without --color-mode the requested fidelity defaults to truecolor.
+        let s2 = settings(RenderOpts {
+            color: true,
+            ..RenderOpts::default()
+        });
+        assert_eq!(
+            ImageState::from_settings(&s2).color.mode,
+            ColorMode::TrueColor
+        );
+    }
+
+    #[test]
+    fn color_off_frame_is_byte_identical_to_grayscale() {
+        // Colour off must produce exactly the same cells (no fg/bg) as the pre-color grayscale path.
+        let img = red_pixel();
+        let st = ImageState::from_settings(&settings(RenderOpts::default()));
+        let mut fb = Framebuffer::new(0, 0);
+        let frame = render_state(
+            &img,
+            &st,
+            Viewport::new(40, 8),
+            ColorMode::None,
+            ColorMode::TrueColor,
+            &mut fb,
+        );
+        // No cell carries a color when the effective mode is None.
+        assert!(
+            frame
+                .cells()
+                .iter()
+                .all(|c| c.fg.is_none() && c.bg.is_none()),
+            "grayscale output must attach no color"
+        );
+    }
+
+    #[test]
+    fn blocks_renderer_attaches_fg_and_bg_when_color_on() {
+        // A colored fixture through the blocks encoder in color mode gives two colors per cell.
+        let img = red_pixel();
+        let mut st = ImageState::from_settings(&settings(RenderOpts::default()));
+        st.renderer = ResolvedRenderer::Blocks;
+        st.color.on = true;
+        st.show_ui = false; // avoid the status bar overwriting cells with colorless glyphs
+        let mut fb = Framebuffer::new(0, 0);
+        let frame = render_state(
+            &img,
+            &st,
+            Viewport::new(8, 4),
+            ColorMode::TrueColor,
+            ColorMode::TrueColor,
+            &mut fb,
+        );
+        let top_left = frame.get(0, 0);
+        assert!(top_left.fg.is_some(), "blocks color sets a foreground");
+        assert!(
+            top_left.bg.is_some(),
+            "blocks color sets a background (fg=top, bg=bottom)"
+        );
+
+        // The same fixture with color off attaches nothing.
+        st.color.on = false;
+        let frame_off = render_state(
+            &img,
+            &st,
+            Viewport::new(8, 4),
+            ColorMode::None,
+            ColorMode::TrueColor,
+            &mut fb,
+        );
+        assert!(frame_off.get(0, 0).fg.is_none());
+        assert!(frame_off.get(0, 0).bg.is_none());
+    }
+
+    #[test]
+    fn requesting_truecolor_on_ansi16_terminal_emits_ansi16_escapes() {
+        // End-to-end clamp: request TrueColor but the terminal only supports Ansi16. The engine
+        // serializes at the clamped mode, so the bytes carry a 16-color SGR (`9x`), never a
+        // truecolor `38;2;` sequence.
+        use rgfx_terminal::AnsiSerializer;
+        let img = red_pixel();
+        let mut st = ImageState::from_settings(&settings(RenderOpts::default()));
+        st.renderer = ResolvedRenderer::Blocks;
+        st.color.on = true;
+        st.color.mode = ColorMode::TrueColor;
+        st.show_ui = false;
+
+        let capability = ColorMode::Ansi16;
+        let effective = st.effective_color(capability);
+        assert_eq!(
+            effective,
+            ColorMode::Ansi16,
+            "TrueColor clamps to the Ansi16 terminal"
+        );
+
+        let mut fb = Framebuffer::new(0, 0);
+        let frame = render_state(
+            &img,
+            &st,
+            Viewport::new(8, 4),
+            effective,
+            capability,
+            &mut fb,
+        );
+        let bytes = AnsiSerializer::new(effective).serialize(&frame);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(
+            !text.contains("38;2;"),
+            "no truecolor escapes on an Ansi16 terminal"
+        );
+        assert!(
+            text.contains('\u{1b}'),
+            "some SGR escape is emitted for on-color output"
+        );
     }
 
     #[test]
