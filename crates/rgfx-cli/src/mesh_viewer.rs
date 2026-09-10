@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use glam::Vec3;
-use rgfx_3d::{OrbitController, Rasterizer, ShadingMode, direction_from_azimuth_elevation};
+use rgfx_3d::{
+    OrbitController, Rasterizer, ShadingMode, direction_from_azimuth_elevation, simplify_scene,
+};
 use rgfx_core::{
     BoundingSphere, Camera, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
     TerminalFrame, Viewport,
@@ -205,6 +207,15 @@ impl LightState {
     }
 }
 
+/// A loaded scene together with the simplification that was (or was not) applied on load.
+struct Loaded {
+    /// The scene actually rendered — simplified when [`simplify_note`](Self::simplify_note) is set.
+    scene: Scene,
+    /// `Some((original_tris, simplified_tris))` when the mesh was decimated on load, so the status
+    /// bar can surface the change; `None` when it was rendered at full detail.
+    simplify_note: Option<(usize, usize)>,
+}
+
 /// Runs the 3D viewer for a request. Entry point called by the dispatch layer.
 pub fn view(request: &ViewRequest<'_>, format: MeshFormat) -> anyhow::Result<()> {
     let path = match request.input {
@@ -213,32 +224,102 @@ pub fn view(request: &ViewRequest<'_>, format: MeshFormat) -> anyhow::Result<()>
             anyhow::bail!("reading meshes from stdin is not supported (pass a file path)")
         }
     };
-    let scene = load_scene(path, format)?;
+    let loaded = load_scene(path, format, request.settings)?;
 
     match &request.settings.output {
-        Some(out) => write_output(&scene, path, request.settings, out),
-        None => run_interactive(&scene, path, request.settings),
+        Some(out) => write_output(&loaded, path, request.settings, out),
+        None => run_interactive(&loaded, path, request.settings),
     }
 }
 
-/// Loads a [`Scene`] with the loader matching `format`.
-fn load_scene(path: &Path, format: MeshFormat) -> anyhow::Result<Scene> {
-    match format {
-        MeshFormat::Obj => {
-            rgfx_3d::load_obj(path).with_context(|| format!("loading OBJ {}", path.display()))
+/// Loads a [`Scene`] with the loader matching `format`, then applies mesh simplification when the
+/// settings call for it (an explicit `--simplify`, or the automatic budget for a heavy mesh). The
+/// original scene's triangle count is preserved in the returned [`Loaded::simplify_note`] — the
+/// `rgfx info` path loads independently, so it always reports the true on-disk counts.
+fn load_scene(path: &Path, format: MeshFormat, settings: &Settings) -> anyhow::Result<Loaded> {
+    let scene =
+        match format {
+            MeshFormat::Obj => rgfx_3d::load_obj(path)
+                .with_context(|| format!("loading OBJ {}", path.display()))?,
+            MeshFormat::Stl => rgfx_3d::load_stl(path)
+                .with_context(|| format!("loading STL {}", path.display()))?,
+            MeshFormat::Gltf => rgfx_3d::load_gltf(path)
+                .with_context(|| format!("loading glTF {}", path.display()))?,
+            MeshFormat::Blend => rgfx_3d::load_blend(path).with_context(|| {
+                format!(
+                    "loading Blender file {} (via headless export)",
+                    path.display()
+                )
+            })?,
+        };
+
+    let total = scene.triangle_count();
+    match simplify_target(total, settings) {
+        Some(target) if target < total => {
+            let simplified = simplify_scene(&scene, target);
+            let new_tris = simplified.triangle_count();
+            tracing::info!(
+                original = total,
+                simplified = new_tris,
+                "simplified mesh on load"
+            );
+            Ok(Loaded {
+                scene: simplified,
+                simplify_note: Some((total, new_tris)),
+            })
         }
-        MeshFormat::Stl => {
-            rgfx_3d::load_stl(path).with_context(|| format!("loading STL {}", path.display()))
-        }
-        MeshFormat::Gltf => {
-            rgfx_3d::load_gltf(path).with_context(|| format!("loading glTF {}", path.display()))
-        }
-        MeshFormat::Blend => rgfx_3d::load_blend(path).with_context(|| {
-            format!(
-                "loading Blender file {} (via headless export)",
-                path.display()
-            )
+        _ => Ok(Loaded {
+            scene,
+            simplify_note: None,
         }),
+    }
+}
+
+/// Decides the triangle target for a mesh with `total` triangles under `settings`, or `None` to
+/// render at full detail.
+///
+/// An explicit `--simplify` wins: a value in `(0, 1]` is a fraction of `total`, a value greater
+/// than `1` is an absolute triangle count. With no explicit request, a mesh above the configured
+/// automatic budget targets that budget. `--no-simplify` clears both (it is folded into
+/// [`Settings`] as `simplify = None` and `auto_simplify = false`).
+///
+/// The returned target may equal or exceed `total`; the caller only simplifies when it is strictly
+/// smaller, so "keep everything" requests are a no-op.
+pub(crate) fn simplify_target(total: usize, settings: &Settings) -> Option<usize> {
+    if let Some(v) = settings.simplify {
+        if v <= 0.0 {
+            return None;
+        }
+        let target = if v <= 1.0 {
+            (total as f32 * v).round() as usize
+        } else {
+            v.round() as usize
+        };
+        return Some(target.max(1));
+    }
+    if settings.auto_simplify && total > settings.simplify_budget {
+        return Some(settings.simplify_budget);
+    }
+    None
+}
+
+/// Nearest-neighbor upscales the rendered `src` framebuffer into the full-size `dst`, used by the
+/// adaptive-resolution path: while interacting the scene is rasterized into a smaller `src` (fewer
+/// fragments to shade) and stretched to the display size here, which is far cheaper than a
+/// full-resolution rasterize of a heavy mesh. Every `dst` pixel is written, so no pre-clear is
+/// needed.
+fn upscale_into(src: &Framebuffer, dst: &mut Framebuffer) {
+    let (sw, sh) = (src.width(), src.height());
+    let (dw, dh) = (dst.width(), dst.height());
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return;
+    }
+    for y in 0..dh {
+        let sy = (y * sh / dh).min(sh - 1);
+        for x in 0..dw {
+            let sx = (x * sw / dw).min(sw - 1);
+            dst.set(x, y, src.get(sx, sy));
+        }
     }
 }
 
@@ -292,6 +373,10 @@ pub(crate) struct ViewerState {
     show_ui: bool,
     /// The last pointer cell while a left-drag is in progress, for drag-to-orbit deltas.
     last_drag: Option<(u16, u16)>,
+    /// Reused reduced-resolution framebuffer for the adaptive interaction path (no per-frame
+    /// allocation): the scene is rasterized into this while the user is actively orbiting/zooming,
+    /// then stretched up to the full framebuffer for encoding.
+    scratch: Framebuffer,
 }
 
 impl ViewerState {
@@ -318,6 +403,7 @@ impl ViewerState {
             light: LightState::new(),
             show_ui: true,
             last_drag: None,
+            scratch: Framebuffer::new(0, 0),
         };
         state.update_clip();
         state
@@ -464,8 +550,8 @@ impl ViewerState {
         ras
     }
 
-    /// Renders the scene into `fb` (reused) and encodes it into a [`TerminalFrame`], optionally
-    /// overlaying the status bar.
+    /// Renders the scene at full resolution into `fb` (reused) and encodes it into a
+    /// [`TerminalFrame`], optionally overlaying the status bar.
     fn render(
         &mut self,
         scene: &Scene,
@@ -474,13 +560,41 @@ impl ViewerState {
         encoder_color: ColorMode,
         status: Option<&StatusInfo<'_>>,
     ) -> anyhow::Result<TerminalFrame> {
+        self.render_scaled(scene, viewport, fb, encoder_color, status, 1)
+    }
+
+    /// Renders and encodes the scene at a `downscale` factor (`1` = full resolution). For
+    /// `downscale > 1` the scene is rasterized into a framebuffer reduced by that factor on each
+    /// axis — roughly `downscale²` fewer fragments to shade — then nearest-neighbor stretched up to
+    /// the full framebuffer before encoding. The displayed size (cell grid) is unchanged; only the
+    /// internal render resolution drops, which keeps interaction responsive on heavy meshes.
+    fn render_scaled(
+        &mut self,
+        scene: &Scene,
+        viewport: Viewport,
+        fb: &mut Framebuffer,
+        encoder_color: ColorMode,
+        status: Option<&StatusInfo<'_>>,
+        downscale: u32,
+    ) -> anyhow::Result<TerminalFrame> {
         let (pw, ph) = viewport.render_size(SUBPIXEL_X, SUBPIXEL_Y);
         fb.resize(pw, ph);
         self.set_aspect(viewport);
 
+        // Copy the camera before borrowing `self` mutably for the scratch buffer; the rasterizer is
+        // built from copies of the current toggle/light state.
+        let camera = self.camera;
         let mut ras = self.rasterizer();
-        ras.render(scene, &self.camera, fb)
-            .context("rendering mesh")?;
+        if downscale <= 1 {
+            ras.render(scene, &camera, fb).context("rendering mesh")?;
+        } else {
+            let lw = (pw / downscale as usize).max(1);
+            let lh = (ph / downscale as usize).max(1);
+            self.scratch.resize(lw, lh);
+            ras.render(scene, &camera, &mut self.scratch)
+                .context("rendering mesh")?;
+            upscale_into(&self.scratch, fb);
+        }
 
         let color = if self.color {
             encoder_color
@@ -513,10 +627,15 @@ impl ViewerState {
         } else {
             "light:off".to_string()
         };
+        // Surface any load-time simplification so the triangle change is never silent.
+        let tris = match info.simplify {
+            Some((orig, new)) => format!("{orig}\u{2192}{new} tris (simplified)"),
+            None => format!("{} tris", info.triangles),
+        };
         let status = format!(
-            "{} | {} tris | {:.1} fps | {} | {}{} | {}",
+            "{} | {} | {:.1} fps | {} | {}{} | {}",
             info.file,
-            info.triangles,
+            tris,
             info.fps,
             RENDERER_NAME,
             shading_name(self.effective_shading()),
@@ -554,10 +673,12 @@ impl ViewerState {
 struct StatusInfo<'a> {
     /// The displayed file name.
     file: &'a str,
-    /// The scene's triangle count.
+    /// The rendered scene's triangle count (after any simplification).
     triangles: usize,
     /// The most recent measured frames-per-second.
     fps: f32,
+    /// `Some((original, simplified))` triangle counts when the mesh was decimated on load.
+    simplify: Option<(usize, usize)>,
 }
 
 // The bottom-bar row rendering lives in `crate::viewer_chrome` (shared with the image and
@@ -605,8 +726,15 @@ fn output_viewport(settings: &Settings) -> Viewport {
 }
 
 /// Renders one frame of the scene to `out` as text (`--output`). Non-interactive: no terminal is
-/// entered, and no status overlay is drawn.
-fn write_output(scene: &Scene, path: &Path, settings: &Settings, out: &Path) -> anyhow::Result<()> {
+/// entered, and no status overlay is drawn. Always full-resolution (adaptive scaling is an
+/// interaction-only optimization).
+fn write_output(
+    loaded: &Loaded,
+    path: &Path,
+    settings: &Settings,
+    out: &Path,
+) -> anyhow::Result<()> {
+    let scene = &loaded.scene;
     let sphere = scene_sphere(scene)?;
     let viewport = output_viewport(settings);
     let mut state = ViewerState::new(sphere, settings, viewport);
@@ -619,16 +747,36 @@ fn write_output(scene: &Scene, path: &Path, settings: &Settings, out: &Path) -> 
     let frame = state.render(scene, viewport, &mut fb, color, None)?;
     std::fs::write(out, frame.to_text())
         .with_context(|| format!("writing output to {}", out.display()))?;
+    if let Some((orig, new)) = loaded.simplify_note {
+        tracing::info!(
+            original = orig,
+            simplified = new,
+            "rendered simplified mesh"
+        );
+    }
     tracing::info!(path = %out.display(), file = %display_name(path), "wrote rendered mesh");
     Ok(())
 }
 
+/// Downscale factor applied to the render resolution while the user is actively interacting. A
+/// factor of 2 quarters the fragment count, keeping orbit/zoom responsive on heavy meshes; the
+/// full-resolution frame is restored once input goes idle.
+const INTERACT_DOWNSCALE: u32 = 2;
+
+/// How long the loop waits for input while interacting. When this elapses with no further input the
+/// view is treated as idle and re-rendered at full resolution.
+const INTERACT_IDLE: Duration = Duration::from_millis(120);
+
 /// Runs the interactive viewer: auto-frame, then an event-driven orbit/render loop that redraws
-/// only on input or resize. The [`Session`] restores the terminal on every exit path.
-fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::Result<()> {
+/// only on input or resize. While the user is actively orbiting/zooming the scene renders at a
+/// reduced resolution for responsiveness, snapping back to full resolution once input goes idle.
+/// The [`Session`] restores the terminal on every exit path.
+fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow::Result<()> {
+    let scene = &loaded.scene;
     let sphere = scene_sphere(scene)?;
     let file = display_name(path);
     let triangles = scene.triangle_count();
+    let simplify = loaded.simplify_note;
 
     let mut session = Session::open_with_mouse()?;
     let mut engine = FrameEngine::new(detect_color_mode());
@@ -638,6 +786,9 @@ fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::R
     let mut viewport = session.viewport()?;
     let mut state = ViewerState::new(sphere, settings, viewport);
     let mut dirty = true;
+    // While `interacting`, render at reduced resolution and poll with a short idle timeout so the
+    // loop wakes to upgrade the frame to full resolution shortly after input stops.
+    let mut interacting = false;
     let mut fps = 0.0f32;
 
     loop {
@@ -647,8 +798,17 @@ fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::R
                 file: &file,
                 triangles,
                 fps,
+                simplify,
             };
-            let frame = state.render(scene, viewport, &mut fb, engine.mode(), Some(&info))?;
+            let downscale = if interacting { INTERACT_DOWNSCALE } else { 1 };
+            let frame = state.render_scaled(
+                scene,
+                viewport,
+                &mut fb,
+                engine.mode(),
+                Some(&info),
+                downscale,
+            )?;
             session.render_frame(&mut engine, &frame)?;
             let elapsed = started.elapsed().as_secs_f32();
             if elapsed > 0.0 {
@@ -657,22 +817,40 @@ fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::R
             dirty = false;
         }
 
-        match session.poll_event(POLL_TIMEOUT)? {
+        // Poll quickly while interacting so we can restore full resolution promptly once idle.
+        let timeout = if interacting {
+            INTERACT_IDLE
+        } else {
+            POLL_TIMEOUT
+        };
+        match session.poll_event(timeout)? {
             Some(Event::Resize(cols, rows)) => {
                 viewport = Viewport::new(cols, rows);
                 state.set_aspect(viewport);
+                interacting = true;
                 dirty = true;
             }
             Some(Event::Key(key)) => match state.on_key(key) {
                 KeyAction::Quit => break,
-                KeyAction::Redraw => dirty = true,
+                KeyAction::Redraw => {
+                    interacting = true;
+                    dirty = true;
+                }
                 KeyAction::Ignore => {}
             },
             Some(Event::Mouse(m)) => match state.on_mouse(m) {
                 KeyAction::Quit => break,
-                KeyAction::Redraw => dirty = true,
+                KeyAction::Redraw => {
+                    interacting = true;
+                    dirty = true;
+                }
                 KeyAction::Ignore => {}
             },
+            // Idle tick after interaction: upgrade to a full-resolution frame.
+            None if interacting => {
+                interacting = false;
+                dirty = true;
+            }
             _ => {}
         }
     }
@@ -1182,6 +1360,7 @@ mod tests {
             file: "cube",
             triangles: 12,
             fps: 60.0,
+            simplify: None,
         };
         let frame = s
             .render(&scene, viewport, &mut fb, ColorMode::None, Some(&info))
@@ -1189,6 +1368,115 @@ mod tests {
         assert!(
             frame.to_text().contains("Light menu"),
             "the modal menu panel must be drawn while open"
+        );
+    }
+
+    // --- Simplification budget decision + adaptive resolution -------------------------------------
+
+    fn settings_with(opts: RenderOpts) -> Settings {
+        Settings::resolve(&Config::default(), &opts)
+    }
+
+    #[test]
+    fn auto_simplify_triggers_only_above_the_budget() {
+        let s = settings_with(RenderOpts::default());
+        let budget = s.simplify_budget;
+        // At or below the budget: no simplification.
+        assert_eq!(simplify_target(budget, &s), None);
+        assert_eq!(simplify_target(budget / 2, &s), None);
+        // Above the budget: target the budget.
+        assert_eq!(simplify_target(budget + 1, &s), Some(budget));
+        assert_eq!(simplify_target(budget * 5, &s), Some(budget));
+    }
+
+    #[test]
+    fn no_simplify_flag_disables_all_simplification() {
+        // Even an explicit ratio is suppressed by --no-simplify.
+        let s = settings_with(RenderOpts {
+            simplify: Some(0.25),
+            no_simplify: true,
+            ..RenderOpts::default()
+        });
+        assert_eq!(simplify_target(1_000_000, &s), None);
+        assert!(!s.auto_simplify);
+        assert_eq!(s.simplify, None);
+    }
+
+    #[test]
+    fn explicit_ratio_targets_a_fraction_of_the_triangles() {
+        let s = settings_with(RenderOpts {
+            simplify: Some(0.25),
+            ..RenderOpts::default()
+        });
+        // 0.25 of 800k -> ~200k.
+        assert_eq!(simplify_target(800_000, &s), Some(200_000));
+        // Ratio applies even below the auto budget.
+        assert_eq!(simplify_target(1000, &s), Some(250));
+    }
+
+    #[test]
+    fn explicit_absolute_target_is_used_directly() {
+        let s = settings_with(RenderOpts {
+            simplify: Some(50_000.0),
+            ..RenderOpts::default()
+        });
+        assert_eq!(simplify_target(705_000, &s), Some(50_000));
+        // A target above the current count is returned as-is; load_scene treats it as a no-op.
+        assert_eq!(simplify_target(10_000, &s), Some(50_000));
+    }
+
+    #[test]
+    fn nonpositive_simplify_value_is_ignored() {
+        let s = settings_with(RenderOpts {
+            simplify: Some(0.0),
+            ..RenderOpts::default()
+        });
+        // Zero/negative falls through to auto (which is off below the budget).
+        assert_eq!(simplify_target(1000, &s), None);
+    }
+
+    #[test]
+    fn adaptive_downscaled_render_matches_full_dimensions_and_draws() {
+        // A reduced-resolution interaction frame must still fill the same cell grid and show the
+        // model (it is upscaled into the full framebuffer before encoding).
+        let scene = cube_scene();
+        let viewport = Viewport::new(48, 24);
+        let mut s = state(viewport);
+        let mut fb = Framebuffer::new(0, 0);
+
+        let full = s
+            .render_scaled(&scene, viewport, &mut fb, ColorMode::None, None, 1)
+            .unwrap();
+        let low = s
+            .render_scaled(&scene, viewport, &mut fb, ColorMode::None, None, 2)
+            .unwrap();
+
+        assert_eq!((low.cols(), low.rows()), (full.cols(), full.rows()));
+        assert!(
+            has_visible_content(&low),
+            "the downscaled frame must still draw the model"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_simplified_counts() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(80, 24);
+        let mut s = state(viewport);
+        let mut fb = Framebuffer::new(0, 0);
+        let info = StatusInfo {
+            file: "big.obj",
+            triangles: 150_000,
+            fps: 30.0,
+            simplify: Some((705_000, 150_000)),
+        };
+        let frame = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, Some(&info))
+            .unwrap();
+        let text = frame.to_text();
+        assert!(
+            text.contains("705000\u{2192}150000") && text.contains("simplified"),
+            "status bar must surface the N->M simplification"
         );
     }
 }

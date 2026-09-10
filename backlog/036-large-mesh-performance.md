@@ -47,6 +47,22 @@ model renders in 0.03 s, so the problem is triangle count, not the pipeline per 
 GPU rendering. LOD streaming. Skinned-mesh handling. Quadric decimation (future upgrade).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + timing check · [ ] PR opened · [ ] Merged
+- [x] Implemented (levers 1 + 2; lever 3 rayon left as optional follow-up) · [x] Gate green +
+      timing check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟩 IN REVIEW (branch `task/036-perf-b`)
+
+### Implementation notes
+- **Vertex-clustering simplification** — new `rgfx-3d` `simplify` module with pure, tested
+  `simplify_scene(&Scene, target_tris) -> Scene`: uniform grid from the scene bbox, weld vertices
+  per cell to their mean, drop degenerate/zero-area triangles; binary-search the grid resolution
+  for the finest fit `<= target`. Deterministic (first-seen cluster ids + mean accumulation).
+  Auto-simplify on load above a tunable budget (`three_d.simplify_budget`, default 150k);
+  CLI `--simplify <ratio|target>` / `--no-simplify`; status bar shows `N→M tris (simplified)`;
+  `rgfx info` loads independently so it still reports the original counts.
+- **Adaptive resolution** — the mesh viewer renders into a reduced framebuffer while the user is
+  interacting (orbit/zoom/resize), upscaling into the full framebuffer, then snaps back to full
+  resolution ~120 ms after input goes idle. Reuses one scratch framebuffer (no per-frame alloc).
+- **Measured** (720k-tri generated mesh, 240×120 px, release): 215.9 ms/frame → 25.7 ms/frame,
+  **8.39× per-frame**; including the one-time 442 ms simplify the 30-frame total drops 6.48 s →
+  1.21 s (5.3×). Run `cargo test -p rgfx-3d --release -- --ignored --nocapture render_speedup`.
