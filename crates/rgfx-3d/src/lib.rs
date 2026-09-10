@@ -32,6 +32,7 @@
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod blend;
 mod framing;
 pub mod gltf;
 mod line;
@@ -41,6 +42,7 @@ pub mod primitives;
 mod raster;
 pub mod stl;
 
+pub use blend::{blender_available, load_blend, load_blend_with_stats};
 pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
     perspective_fit_distance,
@@ -65,6 +67,41 @@ mod tests {
     }
 
     // --- Orbit state / camera position math ---------------------------------------------------
+
+    #[test]
+    fn roll_rotates_camera_up_about_the_view_axis() {
+        // Looking down -Z from +Z, up starts at +Y. A +90° roll about the view axis rotates up
+        // into the horizontal plane (|up.y| ~ 0), and the up vector stays unit length.
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+        assert!(approx(cam.up, Vec3::Y, EPS), "no roll => up is +Y");
+        c.roll(std::f32::consts::FRAC_PI_2);
+        c.sync(&mut cam);
+        assert!(cam.up.y.abs() < EPS, "90° roll tilts up out of vertical");
+        assert!((cam.up.length() - 1.0).abs() < EPS, "up stays unit length");
+        // A full turn returns to the original up.
+        c.roll(std::f32::consts::FRAC_PI_2 * 3.0);
+        c.sync(&mut cam);
+        assert!(approx(cam.up, Vec3::Y, 1e-3), "2π roll returns to +Y");
+    }
+
+    #[test]
+    fn reset_restores_roll_and_set_view_rehomes() {
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        c.set_view(0.6, 0.4); // establish a default 3/4 view as the new home
+        c.roll(0.5);
+        c.orbit(1.0, 0.2);
+        c.reset();
+        assert!(
+            (c.roll_angle()).abs() < EPS,
+            "reset clears roll to home (0)"
+        );
+        assert!(
+            (c.yaw() - 0.6).abs() < EPS && (c.pitch() - 0.4).abs() < EPS,
+            "reset returns to set_view home"
+        );
+    }
 
     #[test]
     fn default_orientation_sits_on_plus_z() {

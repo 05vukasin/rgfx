@@ -55,7 +55,21 @@ impl Session {
     /// Installs the process-wide panic hook so a crash still restores the terminal. Fails cleanly
     /// (returning an error, never a panic) when there is no controlling TTY.
     pub fn open() -> anyhow::Result<Self> {
-        let term = Terminal::new(TerminalOptions::default())?;
+        Self::open_with(false)
+    }
+
+    /// Like [`Session::open`] but also captures mouse events (drag, wheel) for viewers that use
+    /// them — e.g. the 3D viewer's drag-to-orbit. Capturing the mouse takes over the terminal's
+    /// native text selection while the session is live.
+    pub fn open_with_mouse() -> anyhow::Result<Self> {
+        Self::open_with(true)
+    }
+
+    fn open_with(mouse_capture: bool) -> anyhow::Result<Self> {
+        let term = Terminal::new(TerminalOptions {
+            mouse_capture,
+            ..TerminalOptions::default()
+        })?;
         Ok(Self { term })
     }
 

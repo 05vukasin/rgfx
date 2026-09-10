@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- 3D viewer: opens at a 3/4 angle (fixes the flat "poorly loaded" first frame), adds a roll axis (`z`/`x`), mouse drag-to-orbit + wheel-zoom, and `.blend` support via headless Blender export. (#031)
+
 ### Fixed
 - Still images now render **inline** at the terminal size and return to the shell by default; the full-screen viewer moved behind `--interactive`. `--output`/inline width now follows the real terminal instead of a fixed 80 columns. (#030)
 

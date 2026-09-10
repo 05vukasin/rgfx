@@ -14,7 +14,7 @@
 
 use std::f32::consts::FRAC_PI_2;
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use rgfx_core::{BoundingSphere, Camera, Projection};
 
 use crate::framing::{
@@ -35,6 +35,7 @@ struct OrbitState {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    roll: f32,
 }
 
 /// An orbit camera controller operating on an [`rgfx_core::Camera`].
@@ -48,6 +49,8 @@ pub struct OrbitController {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    /// Roll about the view axis, in radians. `0` keeps `up` upright.
+    roll: f32,
     up: Vec3,
     home: OrbitState,
 }
@@ -62,12 +65,14 @@ impl OrbitController {
             yaw: 0.0,
             pitch: 0.0,
             distance,
+            roll: 0.0,
         };
         Self {
             target,
             yaw: 0.0,
             pitch: 0.0,
             distance,
+            roll: 0.0,
             up: Vec3::Y,
             home,
         }
@@ -85,12 +90,14 @@ impl OrbitController {
             yaw,
             pitch,
             distance,
+            roll: 0.0,
         };
         Self {
             target: camera.target,
             yaw,
             pitch,
             distance,
+            roll: 0.0,
             up: if camera.up.length_squared() > f32::EPSILON {
                 camera.up.normalize()
             } else {
@@ -139,6 +146,42 @@ impl OrbitController {
         self.pitch = (self.pitch + pitch_delta).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
+    /// The roll angle in radians (rotation of the up vector about the view axis).
+    pub fn roll_angle(&self) -> f32 {
+        self.roll
+    }
+
+    /// Rolls the view about the forward (view) axis by `delta` radians — the third rotation axis,
+    /// tilting the horizon. Yaw and pitch orbit the camera around the model; roll spins the camera
+    /// about the line of sight.
+    pub fn roll(&mut self, delta: f32) {
+        if delta.is_finite() {
+            self.roll += delta;
+        }
+    }
+
+    /// Sets the yaw/pitch orbit angles directly (radians, pitch clamped) and records them as the
+    /// reset home, so `reset` returns here. Used to establish a pleasant default 3/4 view after
+    /// [`OrbitController::auto_frame`].
+    pub fn set_view(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw;
+        self.pitch = pitch.clamp(-MAX_PITCH, MAX_PITCH);
+        self.home.yaw = self.yaw;
+        self.home.pitch = self.pitch;
+    }
+
+    /// The camera up vector after applying roll about the view axis.
+    fn effective_up(&self) -> Vec3 {
+        if self.roll.abs() < f32::EPSILON {
+            return self.up;
+        }
+        let forward = (self.target - self.position()).normalize_or_zero();
+        if forward.length_squared() < f32::EPSILON {
+            return self.up;
+        }
+        (Quat::from_axis_angle(forward, self.roll) * self.up).normalize_or_zero()
+    }
+
     /// Zooms (dollies) by scaling the orbit distance. `scale < 1` moves closer, `scale > 1`
     /// moves farther; the distance is clamped to a small positive minimum.
     pub fn zoom(&mut self, scale: f32) {
@@ -179,13 +222,14 @@ impl OrbitController {
         self.yaw = self.home.yaw;
         self.pitch = self.home.pitch;
         self.distance = self.home.distance;
+        self.roll = self.home.roll;
     }
 
     /// Writes the current orbit state into `camera` (position, target, and up).
     pub fn sync(&self, camera: &mut Camera) {
         camera.position = self.position();
         camera.target = self.target;
-        camera.up = self.up;
+        camera.up = self.effective_up();
     }
 
     /// Frames `sphere` inside a viewport of the given `aspect`, keeping the current view
@@ -231,6 +275,7 @@ impl OrbitController {
             yaw: self.yaw,
             pitch: self.pitch,
             distance: self.distance,
+            roll: self.roll,
         };
 
         self.sync(camera);

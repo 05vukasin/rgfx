@@ -46,6 +46,8 @@ pub enum MeshFormat {
     Stl,
     /// glTF / GLB (`.gltf`, `.glb`).
     Gltf,
+    /// Blender scene (`.blend`), loaded by exporting to glTF via a headless Blender.
+    Blend,
 }
 
 /// The kind of media an input holds, as far as `rgfx` needs to route it to a viewer.
@@ -75,6 +77,7 @@ impl MediaKind {
             "obj" => MediaKind::Mesh(MeshFormat::Obj),
             "stl" => MediaKind::Mesh(MeshFormat::Stl),
             "gltf" | "glb" => MediaKind::Mesh(MeshFormat::Gltf),
+            "blend" => MediaKind::Mesh(MeshFormat::Blend),
             _ => MediaKind::Unknown,
         }
     }
@@ -103,6 +106,11 @@ impl MediaKind {
         // GLB (binary glTF): magic "glTF" at offset 0.
         if bytes.starts_with(b"glTF") {
             return Some(MediaKind::Mesh(MeshFormat::Gltf));
+        }
+        // Blender: uncompressed `.blend` files start with "BLENDER". (Compressed saves are caught
+        // by the `.blend` extension fallback instead.)
+        if bytes.starts_with(b"BLENDER") {
+            return Some(MediaKind::Mesh(MeshFormat::Blend));
         }
         // RIFF containers: WEBP (image) and AVI (video) share the "RIFF" prefix.
         if bytes.len() >= 12 && bytes.starts_with(b"RIFF") {
@@ -205,6 +213,7 @@ mod tests {
             ("stl", MediaKind::Mesh(MeshFormat::Stl)),
             ("glb", MediaKind::Mesh(MeshFormat::Gltf)),
             ("gltf", MediaKind::Mesh(MeshFormat::Gltf)),
+            ("blend", MediaKind::Mesh(MeshFormat::Blend)),
             ("txt", MediaKind::Unknown),
             ("", MediaKind::Unknown),
         ];
@@ -227,6 +236,11 @@ mod tests {
         // ISO-BMFF mp4: any 4-byte size prefix followed by "ftyp".
         let mp4 = *b"\x00\x00\x00\x18ftypmp42";
         assert_eq!(MediaKind::from_magic(&mp4), Some(MediaKind::Video));
+
+        assert_eq!(
+            MediaKind::from_magic(b"BLENDER-v300RENDH"),
+            Some(MediaKind::Mesh(MeshFormat::Blend))
+        );
 
         let glb = *b"glTF\x02\x00\x00\x00";
         assert_eq!(
