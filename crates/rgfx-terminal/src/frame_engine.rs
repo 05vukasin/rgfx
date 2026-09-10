@@ -124,10 +124,24 @@ impl FrameEngine {
     }
 
     /// Appends a full-frame redraw (clear + home + the whole serialized grid) to the scratch buffer.
+    ///
+    /// The interactive viewers run in raw mode (alternate screen), where the terminal does **not**
+    /// translate `\n` into `\r\n`: a bare line-feed advances a row without returning to column 0, so
+    /// the serializer's `\n`-joined grid staircases across the screen. To stay correct in raw mode
+    /// this positions every row with an absolute cursor move (`\x1b[{row+1};1H`), exactly like
+    /// [`emit_diff`](Self::emit_diff), instead of relying on the row separators. A cursor move does
+    /// not disturb SGR state, so color runs the serializer carries across rows are preserved.
+    /// Splitting on `\n` is safe because SGR escapes never contain one.
     fn emit_full_redraw(&mut self, next: &TerminalFrame) {
         self.scratch.extend_from_slice(CLEAR_HOME);
         let bytes = self.serializer.serialize(next);
-        self.scratch.extend_from_slice(&bytes);
+        for (row, line) in bytes.split(|&b| b == b'\n').enumerate() {
+            // Absolute cursor move to (row, col 1), 1-based: ESC [ <row+1> ; 1 H.
+            self.scratch.extend_from_slice(b"\x1b[");
+            push_uint(&mut self.scratch, row + 1);
+            self.scratch.extend_from_slice(b";1H");
+            self.scratch.extend_from_slice(line);
+        }
     }
 
     /// Appends the changed cell runs of `next` (relative to the front buffer) to the scratch buffer.
@@ -302,10 +316,56 @@ mod tests {
         let mut out = RecordingWriter::default();
         engine.render(&frame, &mut out).unwrap();
 
-        let mut expected = b"\x1b[2J\x1b[H".to_vec();
-        expected.extend_from_slice(frame.to_text().as_bytes());
-        assert_eq!(out.data, expected);
+        // Clear+home, then every row positioned with an absolute cursor move (raw-mode safe).
+        assert_eq!(out.data, b"\x1b[2J\x1b[H\x1b[1;1Haaa\x1b[2;1Haaa");
         assert_eq!(out.flushes, 1, "one flush for the full redraw");
+    }
+
+    /// A full redraw of a multi-row frame must never rely on a bare `\n` to move to the next row:
+    /// in raw mode `\n` line-feeds without a carriage return, staircasing the frame. Every row must
+    /// be positioned explicitly (an absolute cursor move here, or a `\r`). This asserts the emitted
+    /// bytes directly — a PTY capture that splits on `\n` would mask the regression.
+    #[test]
+    fn full_redraw_positions_every_row_without_bare_newline() {
+        let mut engine = FrameEngine::new(ColorMode::None);
+        let frame = filled(3, 3, 'a');
+        let mut out = RecordingWriter::default();
+        engine.render(&frame, &mut out).unwrap();
+
+        // No bare line-feed and no carriage return needed because each row is absolutely placed.
+        assert!(
+            !out.data.contains(&b'\n'),
+            "full redraw emitted a bare \\n that would staircase in raw mode: {:?}",
+            out.data
+        );
+
+        // Every one of the three rows is preceded by its own absolute cursor move.
+        for row in 1..=3usize {
+            let mv = format!("\x1b[{row};1H");
+            assert!(
+                out.data.windows(mv.len()).any(|w| w == mv.as_bytes()),
+                "row {row} is not positioned with an absolute cursor move"
+            );
+        }
+    }
+
+    /// Two consecutive full redraws (forced here by a resize between them) must both position rows
+    /// correctly — the fix must not depend on any leftover state from a prior frame.
+    #[test]
+    fn consecutive_full_redraws_both_position_rows() {
+        let mut engine = FrameEngine::new(ColorMode::None);
+
+        let a = filled(3, 2, 'a');
+        let mut out_a = RecordingWriter::default();
+        engine.render(&a, &mut out_a).unwrap();
+        assert_eq!(out_a.data, b"\x1b[2J\x1b[H\x1b[1;1Haaa\x1b[2;1Haaa");
+
+        // Different dimensions → a second full redraw rather than a diff.
+        let b = filled(2, 2, 'b');
+        let mut out_b = RecordingWriter::default();
+        engine.render(&b, &mut out_b).unwrap();
+        assert_eq!(out_b.data, b"\x1b[2J\x1b[H\x1b[1;1Hbb\x1b[2;1Hbb");
+        assert!(!out_b.data.contains(&b'\n'));
     }
 
     #[test]
@@ -399,9 +459,8 @@ mod tests {
         let mut out = RecordingWriter::default();
         engine.render(&c, &mut out).unwrap();
 
-        let mut expected = b"\x1b[2J\x1b[H".to_vec();
-        expected.extend_from_slice(c.to_text().as_bytes());
-        assert_eq!(out.data, expected);
+        // Single-row frame: clear+home then one positioned row.
+        assert_eq!(out.data, b"\x1b[2J\x1b[H\x1b[1;1Hccccc");
     }
 
     #[test]

@@ -46,6 +46,9 @@ Make the full-redraw path position rows explicitly instead of relying on `\n`:
 - [ ] Regression: two consecutive identical full redraws still position rows correctly.
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + byte-level test · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + byte-level test · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟩 IMPLEMENTED — `emit_full_redraw` now positions every row with an absolute cursor
+move (`\x1b[{row+1};1H`) instead of relying on the serializer's `\n` separators, so full redraws
+are correct in raw mode. `TerminalFrame::to_text` / `--output` and the diff path are untouched.
+Byte-level regression tests assert every row is positioned and no bare `\n` is emitted.
