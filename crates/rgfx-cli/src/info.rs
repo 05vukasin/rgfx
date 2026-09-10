@@ -315,6 +315,21 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.animations = Some(stats.animation_count);
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
+        MeshFormat::Blend => {
+            let (_scene, stats) = rgfx_3d::load_blend_with_stats(path).with_context(|| {
+                format!(
+                    "loading Blender file {} (via headless export)",
+                    path.display()
+                )
+            })?;
+            report.format = Some("Blender (via glTF export)".to_string());
+            report.meshes = Some(stats.mesh_count);
+            report.vertices = Some(stats.vertex_count);
+            report.triangles = Some(stats.triangle_count);
+            report.materials = Some(stats.material_count);
+            report.animations = Some(stats.animation_count);
+            report.bounding_box = stats.bounding_box.map(bbox_size);
+        }
     }
     Ok(report)
 }

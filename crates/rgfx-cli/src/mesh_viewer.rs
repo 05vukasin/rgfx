@@ -26,8 +26,8 @@ use rgfx_core::{
     TerminalFrame, Viewport,
 };
 use rgfx_terminal::{
-    BrailleEncoder, BrailleOptions, ColorMode, Event, FrameEngine, KeyCode, KeyEvent, SUBPIXEL_X,
-    SUBPIXEL_Y, detect_color_mode,
+    BrailleEncoder, BrailleOptions, ColorMode, Event, FrameEngine, KeyCode, KeyEvent, MouseButton,
+    MouseEvent, MouseEventKind, SUBPIXEL_X, SUBPIXEL_Y, detect_color_mode,
 };
 
 use crate::cli::Shading;
@@ -38,6 +38,17 @@ use crate::terminal::{Session, is_quit};
 
 /// Radians orbited per arrow-key press (~6.9°).
 const ORBIT_STEP: f32 = 0.12;
+
+/// Radians the view rolls per `z`/`x` press (rotation about the line of sight — the third axis).
+const ROLL_STEP: f32 = 0.12;
+
+/// Radians of orbit per terminal cell of mouse drag (drag-to-orbit sensitivity).
+const MOUSE_ORBIT_STEP: f32 = 0.04;
+
+/// The default 3/4 orbit applied after auto-framing so a model reads as 3D on load instead of a
+/// flat, axis-aligned silhouette. Yaw swings to the right-front, pitch lifts slightly above.
+const DEFAULT_YAW: f32 = -0.6; // ~ -34°
+const DEFAULT_PITCH: f32 = 0.45; // ~ +26°
 /// Distance multiplier applied by a single zoom-in (`+`) press.
 const ZOOM_IN: f32 = 0.9;
 /// Distance multiplier applied by a single zoom-out (`-`) press.
@@ -91,6 +102,12 @@ fn load_scene(path: &Path, format: MeshFormat) -> anyhow::Result<Scene> {
         MeshFormat::Gltf => {
             rgfx_3d::load_gltf(path).with_context(|| format!("loading glTF {}", path.display()))
         }
+        MeshFormat::Blend => rgfx_3d::load_blend(path).with_context(|| {
+            format!(
+                "loading Blender file {} (via headless export)",
+                path.display()
+            )
+        }),
     }
 }
 
@@ -142,6 +159,8 @@ pub(crate) struct ViewerState {
     lighting: bool,
     /// Whether the status bar / key help overlay is shown.
     show_ui: bool,
+    /// The last pointer cell while a left-drag is in progress, for drag-to-orbit deltas.
+    last_drag: Option<(u16, u16)>,
 }
 
 impl ViewerState {
@@ -152,6 +171,10 @@ impl ViewerState {
         let mut camera = Camera::perspective(aspect, settings.fov_degrees.to_radians());
         let mut controls = OrbitController::from_camera(&camera);
         controls.auto_frame(&mut camera, &sphere, aspect);
+        // Start at a 3/4 view (and make it the reset home) so the model is immediately legible in
+        // 3D rather than a flat, dead-on silhouette; then push it into the camera.
+        controls.set_view(DEFAULT_YAW, DEFAULT_PITCH);
+        controls.sync(&mut camera);
 
         let shading_index = cycle_index(shading_mode(settings.shading));
         let mut state = Self {
@@ -163,6 +186,7 @@ impl ViewerState {
             color: settings.color,
             lighting: true,
             show_ui: true,
+            last_drag: None,
         };
         state.update_clip();
         state
@@ -194,6 +218,8 @@ impl ViewerState {
             KeyCode::Down => self.controls.orbit(0.0, -ORBIT_STEP),
             KeyCode::Char('+') | KeyCode::Char('=') => self.controls.zoom(ZOOM_IN),
             KeyCode::Char('-') | KeyCode::Char('_') => self.controls.zoom(ZOOM_OUT),
+            KeyCode::Char('z') | KeyCode::Char('Z') => self.controls.roll(-ROLL_STEP),
+            KeyCode::Char('x') | KeyCode::Char('X') => self.controls.roll(ROLL_STEP),
             KeyCode::Char('r') | KeyCode::Char('R') => self.controls.reset(),
             KeyCode::Char('w') | KeyCode::Char('W') => self.wireframe = !self.wireframe,
             KeyCode::Char('s') | KeyCode::Char('S') => {
@@ -205,6 +231,44 @@ impl ViewerState {
             _ => return KeyAction::Ignore,
         }
         KeyAction::Redraw
+    }
+
+    /// Applies a mouse event: left-drag orbits the model in both axes (the horizontal drag gives
+    /// the left/right rotation, the vertical drag the up/down), and the wheel zooms.
+    pub(crate) fn on_mouse(&mut self, m: MouseEvent) -> KeyAction {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.last_drag = Some((m.col, m.row));
+                KeyAction::Ignore
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let action = if let Some((lc, lr)) = self.last_drag {
+                    let dx = m.col as f32 - lc as f32;
+                    let dy = m.row as f32 - lr as f32;
+                    // Drag right → orbit right (yaw+); drag up (row index decreases) → pitch up.
+                    self.controls
+                        .orbit(dx * MOUSE_ORBIT_STEP, -dy * MOUSE_ORBIT_STEP);
+                    KeyAction::Redraw
+                } else {
+                    KeyAction::Ignore
+                };
+                self.last_drag = Some((m.col, m.row));
+                action
+            }
+            MouseEventKind::Up(_) => {
+                self.last_drag = None;
+                KeyAction::Ignore
+            }
+            MouseEventKind::ScrollUp => {
+                self.controls.zoom(ZOOM_IN);
+                KeyAction::Redraw
+            }
+            MouseEventKind::ScrollDown => {
+                self.controls.zoom(ZOOM_OUT);
+                KeyAction::Redraw
+            }
+            _ => KeyAction::Ignore,
+        }
     }
 
     /// Recomputes the camera aspect for a new viewport (e.g. on resize), keeping the current orbit.
@@ -289,8 +353,7 @@ impl ViewerState {
             shading_name(self.effective_shading()),
             if self.color { " | color" } else { "" },
         );
-        let help =
-            "arrows:orbit  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  F:ui  Q:quit";
+        let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  F:ui  Q:quit";
 
         if rows >= 2 {
             write_line(frame, rows - 2, &status);
@@ -397,7 +460,7 @@ fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::R
     let file = display_name(path);
     let triangles = scene.triangle_count();
 
-    let mut session = Session::open()?;
+    let mut session = Session::open_with_mouse()?;
     let mut engine = FrameEngine::new(detect_color_mode());
     // One framebuffer, reused across every re-render (no per-frame allocation).
     let mut fb = Framebuffer::new(0, 0);
@@ -431,6 +494,11 @@ fn run_interactive(scene: &Scene, path: &Path, settings: &Settings) -> anyhow::R
                 dirty = true;
             }
             Some(Event::Key(key)) => match state.on_key(key) {
+                KeyAction::Quit => break,
+                KeyAction::Redraw => dirty = true,
+                KeyAction::Ignore => {}
+            },
+            Some(Event::Mouse(m)) => match state.on_mouse(m) {
                 KeyAction::Quit => break,
                 KeyAction::Redraw => dirty = true,
                 KeyAction::Ignore => {}
@@ -677,5 +745,70 @@ mod tests {
         assert_eq!(output_viewport(&s), Viewport::new(120, 60));
         let d = settings(RenderOpts::default());
         assert_eq!(output_viewport(&d), Viewport::new(80, 40));
+    }
+
+    #[test]
+    fn default_view_is_a_three_quarter_angle_not_dead_on() {
+        // Regression (task 031): the model must load at a 3/4 view so it reads as 3D, rather than
+        // the flat, dead-on (+Z) silhouette that looked like a "poorly loaded" blob.
+        let s = state(Viewport::new(80, 24));
+        assert!((s.controls.yaw() - DEFAULT_YAW).abs() < 1e-6);
+        assert!((s.controls.pitch() - DEFAULT_PITCH).abs() < 1e-6);
+    }
+
+    #[test]
+    fn roll_keys_change_roll_and_request_redraw() {
+        let mut s = state(Viewport::new(80, 24));
+        assert_eq!(s.controls.roll_angle(), 0.0);
+        assert_eq!(s.on_key(key(KeyCode::Char('x'))), KeyAction::Redraw);
+        assert!(s.controls.roll_angle() > 0.0, "x rolls one way");
+        assert_eq!(s.on_key(key(KeyCode::Char('z'))), KeyAction::Redraw);
+        assert!(s.controls.roll_angle().abs() < 1e-6, "z rolls back");
+    }
+
+    #[test]
+    fn mouse_left_drag_orbits_both_axes() {
+        let mut s = state(Viewport::new(80, 24));
+        let before = s.camera.position;
+        let mouse = |kind, col, row| MouseEvent {
+            kind,
+            col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Press, then drag right and up: yaw and pitch should both change (position moves).
+        assert_eq!(
+            s.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 12)),
+            KeyAction::Ignore
+        );
+        assert_eq!(
+            s.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 55, 4)),
+            KeyAction::Redraw
+        );
+        s.set_aspect(Viewport::new(80, 24)); // sync controls -> camera
+        assert!(
+            (s.camera.position - before).length() > 1e-3,
+            "drag must reorient the camera"
+        );
+        // Releasing ends the drag.
+        assert_eq!(
+            s.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 55, 4)),
+            KeyAction::Ignore
+        );
+        assert!(s.last_drag.is_none());
+    }
+
+    #[test]
+    fn mouse_wheel_zooms() {
+        let mut s = state(Viewport::new(80, 24));
+        let d0 = s.controls.distance();
+        let m = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            col: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(s.on_mouse(m), KeyAction::Redraw);
+        assert!(s.controls.distance() < d0, "scroll up zooms in");
     }
 }

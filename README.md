@@ -1152,9 +1152,12 @@ rgfx model.obj
 Suggested controls:
 
 ```text
-Left / Right        Orbit around Y
-Up / Down           Orbit around X
+Left / Right        Orbit around Y (yaw)
+Up / Down           Orbit around X (pitch)
+z / x               Roll around the view axis (third rotation axis)
 + / -               Zoom
+Mouse drag          Orbit (yaw + pitch)
+Mouse wheel         Zoom
 R                   Reset camera
 W                   Toggle wireframe
 S                   Cycle shading
@@ -1164,11 +1167,13 @@ F                   Toggle UI mode
 Q / Esc             Quit
 ```
 
+The viewer opens at a 3/4 angle so a model reads as 3D immediately. `.blend` files are
+supported by exporting to glTF through a headless Blender (requires the `blender` binary on
+`PATH`, or set `RGFX_BLENDER`).
+
 Future:
 
 ```text
-Mouse drag          Orbit
-Mouse wheel         Zoom
 Shift + drag        Pan
 ```
 
