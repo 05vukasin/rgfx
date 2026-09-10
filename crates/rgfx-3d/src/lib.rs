@@ -162,12 +162,102 @@ mod tests {
     }
 
     #[test]
-    fn pitch_is_clamped_short_of_the_pole() {
-        let mut c = OrbitController::new(Vec3::ZERO, 1.0);
-        c.orbit(0.0, 100.0); // absurd upward tilt
-        assert!(c.pitch() < std::f32::consts::FRAC_PI_2);
-        // View basis must stay finite / non-degenerate.
-        assert!(c.position().is_finite());
+    fn up_rotations_summing_to_a_full_turn_return_to_start() {
+        // Free arcball: N small up-tumbles that sum to 2π bring the camera back to its exact start
+        // orientation. No pitch clamp and no gimbal lock — even though we pass straight over the
+        // pole (where the old Euler controller would have stuck at ±90°).
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        c.orbit(0.7, 0.0); // start off-axis so the test is non-trivial
+        let start = c.position();
+        let up0 = {
+            let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+            c.sync(&mut cam);
+            cam.up
+        };
+
+        let steps = 128;
+        let step = std::f32::consts::TAU / steps as f32;
+        let mut crossed_old_pole = false;
+        for _ in 0..steps {
+            c.orbit(0.0, step);
+            // Somewhere in the sweep the camera must climb past the old ±90° pitch limit.
+            if c.direction().y.abs() > (std::f32::consts::FRAC_PI_2 - 1e-3).sin() {
+                crossed_old_pole = true;
+            }
+            assert!(c.position().is_finite(), "position stays finite mid-tumble");
+        }
+        assert!(
+            crossed_old_pole,
+            "the tumble must pass the old ±90° pitch clamp"
+        );
+        assert!(
+            approx(c.position(), start, 1e-3),
+            "a full 2π of up-tumble returns to the start position"
+        );
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+        assert!(approx(cam.up, up0, 1e-3), "and to the start up vector");
+    }
+
+    #[test]
+    fn up_then_right_yields_a_finite_orthonormal_basis_past_the_old_pole() {
+        // Tumble well past the old ±90° pitch limit, then tumble sideways. The derived camera basis
+        // (forward/up/right) must stay finite and orthonormal — no gimbal-lock degeneracy.
+        let mut c = OrbitController::new(Vec3::ZERO, 2.0);
+        c.orbit(0.0, 2.0); // ~115° up, past the old clamp
+        c.orbit(1.0, 0.0); // then sideways
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+
+        let forward = (cam.target - cam.position).normalize();
+        let up = cam.up;
+        let right = forward.cross(up);
+        assert!(forward.is_finite() && up.is_finite() && right.is_finite());
+        assert!((up.length() - 1.0).abs() < EPS, "up stays unit");
+        assert!(forward.dot(up).abs() < 1e-3, "up ⟂ forward");
+        assert!(
+            right.length() > 1e-2,
+            "right is non-degenerate (not parallel)"
+        );
+    }
+
+    #[test]
+    fn roll_composes_about_the_view_axis_without_disturbing_the_tumble() {
+        // Roll spins the camera about its line of sight: the up vector tilts, but the camera does
+        // not move and the view direction is unchanged. A tumble applied afterwards still works.
+        let mut c = OrbitController::new(Vec3::ZERO, 3.0);
+        c.orbit(0.8, 0.5); // tumble to an arbitrary orientation
+        let pos_before = c.position();
+        let dir_before = c.direction();
+
+        c.roll(0.7);
+        assert!(
+            approx(c.position(), pos_before, EPS),
+            "roll must not move the camera"
+        );
+        assert!(
+            approx(c.direction(), dir_before, EPS),
+            "roll must not change the view direction"
+        );
+
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        c.sync(&mut cam);
+        let forward = (cam.target - cam.position).normalize();
+        assert!(
+            forward.dot(cam.up).abs() < 1e-3,
+            "up stays orthogonal to forward after roll"
+        );
+        assert!(
+            (cam.up.length() - 1.0).abs() < EPS,
+            "up stays unit after roll"
+        );
+
+        // The tumble still responds after rolling.
+        c.orbit(0.0, 0.3);
+        assert!(
+            !approx(c.direction(), dir_before, EPS),
+            "tumble still works"
+        );
     }
 
     #[test]

@@ -757,20 +757,33 @@ mod tests {
 
     #[test]
     fn arrow_keys_orbit_the_camera() {
+        // Arcball tumble: each arrow reorients the camera, and the opposite arrow (rotation about
+        // the same axis, negated) brings it back exactly. We assert on the camera position rather
+        // than Euler yaw/pitch, which are no longer independent state.
         let mut s = state(Viewport::new(40, 20));
-        let yaw0 = s.controls.yaw();
-        let pitch0 = s.controls.pitch();
+        let home = s.controls.position();
 
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
-
+        assert!(
+            (s.controls.position() - home).length() > 1e-4,
+            "right tumbles the camera"
+        );
         assert_eq!(s.on_key(key(KeyCode::Left)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - yaw0).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - home).length() < 1e-4,
+            "left undoes right"
+        );
 
         s.on_key(key(KeyCode::Up));
-        assert!((s.controls.pitch() - (pitch0 + ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - home).length() > 1e-4,
+            "up tumbles the camera"
+        );
         s.on_key(key(KeyCode::Down));
-        assert!((s.controls.pitch() - pitch0).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - home).length() < 1e-4,
+            "down undoes up"
+        );
     }
 
     #[test]
@@ -1030,10 +1043,13 @@ mod tests {
         let mut s = state(Viewport::new(40, 20));
 
         // Closed: arrows orbit the camera; the light angles are untouched.
-        let yaw0 = s.controls.yaw();
+        let pos0 = s.controls.position();
         let az0 = s.light.azimuth;
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
-        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - pos0).length() > 1e-4,
+            "closed menu: arrows tumble the camera"
+        );
         assert_eq!(s.light.azimuth, az0, "closed menu must not move the light");
 
         // `L` opens the modal menu.
@@ -1041,12 +1057,12 @@ mod tests {
         assert!(s.light.menu_open);
 
         // Open: arrows move the light; the camera orbit is frozen.
-        let yaw_frozen = s.controls.yaw();
+        let pos_frozen = s.controls.position();
         assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
         assert!((s.light.azimuth - (az0 + LIGHT_ANGLE_STEP)).abs() < 1e-6);
         assert_eq!(
-            s.controls.yaw(),
-            yaw_frozen,
+            s.controls.position(),
+            pos_frozen,
             "camera must not orbit while the menu is open"
         );
         let el0 = s.light.elevation;
@@ -1056,9 +1072,12 @@ mod tests {
         // `Esc` closes; arrows orbit the camera again.
         assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Redraw);
         assert!(!s.light.menu_open);
-        let yaw_resumed = s.controls.yaw();
+        let pos_resumed = s.controls.position();
         s.on_key(key(KeyCode::Left));
-        assert!((s.controls.yaw() - (yaw_resumed - ORBIT_STEP)).abs() < 1e-6);
+        assert!(
+            (s.controls.position() - pos_resumed).length() > 1e-4,
+            "closed again: arrows tumble the camera"
+        );
     }
 
     #[test]

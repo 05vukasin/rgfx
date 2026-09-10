@@ -48,6 +48,18 @@ full freedom. No pole sticking.
 Performance / large-mesh handling (task 036).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [x] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW (branch `task/037-arcball-a`)
+
+### Implementation notes
+Replaced the clamped Euler (`yaw`/`pitch`/`MAX_PITCH`) `OrbitController` with a quaternion
+arcball: the view orientation is a `glam::Quat` (plus `target` + `distance`). `orbit` composes
+`orientation * Ry(yaw) * Rx(-pitch)` — post-multiplication rotates about the camera's *current*
+up/right axes, so there is no pitch clamp and no gimbal lock (any 2π tumble is `R(axis, 2π)` =
+identity, returning exactly to start). `roll` stays a scalar applied about the view axis at
+`sync`/`effective_up` (it never moves the camera). `sync` derives
+`position = target + (orientation * +Z) * distance` and `up = orientation * +Y` (then rolled).
+`from_camera` builds the orientation from an orthonormal basis (`+Z` = target→camera, `+Y` ≈
+camera up) via `Quat::from_mat3`. `yaw()`/`pitch()` are now best-effort values derived from the
+view direction. Viewer wiring unchanged (arrows = tumble, z/x = roll, drag = tumble).
