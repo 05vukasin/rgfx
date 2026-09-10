@@ -47,6 +47,22 @@ model renders in 0.03 s, so the problem is triangle count, not the pipeline per 
 GPU rendering. LOD streaming. Skinned-mesh handling. Quadric decimation (future upgrade).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + timing check · [ ] PR opened · [ ] Merged
+- [x] Implemented (simplification + adaptive resolution) · [x] Gate green + timing check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+## Implementation notes
+- **Vertex-clustering simplification** landed in `rgfx-3d::simplify` (`simplify_scene`,
+  `decide_simplify`, `SimplifyDecision`). Grid resolution is binary-searched so the welded result
+  lands at/under the triangle budget; welded vertices are per-cell averages (bounds preserved) and
+  degenerate/zero-area faces are dropped. Auto-applies above `AUTO_SIMPLIFY_BUDGET` (150k), with
+  `--simplify <ratio|target>` / `--no-simplify` flags and a "simplified N→M" status readout.
+  `rgfx info` loads separately, so it keeps the originals.
+- **Adaptive resolution** in `mesh_viewer`: while orbiting/zooming the scene renders into a reused
+  half-size scratch buffer and is upscaled to fill the screen; a full-resolution frame is redrawn
+  once input settles (`IDLE_SETTLE`).
+- **Measured** (705,672-tri mesh → 149,058 after auto-simplify, per-frame rasterization only):
+  ~4–5x faster per frame (e.g. 131 ms → 27 ms). Adaptive half-res adds interaction headroom on top
+  (most when fill dominates).
+- **Rayon tiled parallel rasterization** (optional) intentionally deferred: it is a larger, riskier
+  change (z-buffer races / snapshot-equality) and the two required levers already deliver the win.
+
+**Status:** ✅ IMPLEMENTED (PR open)

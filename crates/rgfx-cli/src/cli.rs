@@ -69,6 +69,17 @@ pub struct RenderOpts {
     #[arg(long, value_enum, value_name = "MODE")]
     pub shading: Option<Shading>,
 
+    /// Simplify a heavy 3D mesh on load. The value is either a ratio of the original triangle
+    /// count (`0 < r <= 1`, e.g. `0.25` keeps ~25%) or an absolute target triangle count (`> 1`,
+    /// e.g. `100000`). Without this flag, meshes above an automatic budget are simplified anyway;
+    /// pass `--no-simplify` to keep full detail.
+    #[arg(long, value_name = "RATIO|N", conflicts_with = "no_simplify")]
+    pub simplify: Option<f32>,
+
+    /// Never simplify 3D meshes: render every triangle, even for very heavy models.
+    #[arg(long)]
+    pub no_simplify: bool,
+
     /// Enable ANSI color output (default is monochrome).
     #[arg(long)]
     pub color: bool,
@@ -218,6 +229,26 @@ mod tests {
             cli.render.output.as_deref(),
             Some(std::path::Path::new("out.txt"))
         );
+    }
+
+    #[test]
+    fn simplify_ratio_and_target_parse() {
+        let ratio = parse(&["rgfx", "model.obj", "--simplify", "0.25"]);
+        assert_eq!(ratio.render.simplify, Some(0.25));
+        assert!(!ratio.render.no_simplify);
+
+        let target = parse(&["rgfx", "model.obj", "--simplify", "100000"]);
+        assert_eq!(target.render.simplify, Some(100_000.0));
+
+        let off = parse(&["rgfx", "model.obj", "--no-simplify"]);
+        assert!(off.render.no_simplify);
+        assert_eq!(off.render.simplify, None);
+    }
+
+    #[test]
+    fn simplify_and_no_simplify_conflict() {
+        let err = Cli::try_parse_from(["rgfx", "m.obj", "--simplify", "0.5", "--no-simplify"]);
+        assert!(err.is_err(), "--simplify and --no-simplify must conflict");
     }
 
     #[test]

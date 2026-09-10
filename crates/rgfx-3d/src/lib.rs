@@ -41,6 +41,7 @@ pub mod obj;
 mod orbit;
 pub mod primitives;
 mod raster;
+pub mod simplify;
 pub mod stl;
 
 pub use blend::{blender_available, load_blend, load_blend_with_stats};
@@ -54,6 +55,7 @@ pub use line::draw_line;
 pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
 pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
+pub use simplify::{SimplifyDecision, decide_simplify, simplify_scene};
 pub use stl::{StlOptions, StlStats, load_stl, load_stl_with_options};
 
 #[cfg(test)]

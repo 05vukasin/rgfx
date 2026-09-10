@@ -166,6 +166,12 @@ pub struct Settings {
     pub shading: Shading,
     /// Effective wireframe flag.
     pub wireframe: bool,
+    /// Explicit 3D mesh-simplification request: a ratio (`0 < r <= 1`) of the original triangle
+    /// count, or an absolute target count (`> 1`). `None` leaves the automatic on-load policy in
+    /// charge.
+    pub simplify: Option<f32>,
+    /// Disable 3D mesh simplification entirely (render every triangle).
+    pub no_simplify: bool,
     /// Effective vertical field of view in degrees.
     pub fov_degrees: f32,
     /// Loop video playback.
@@ -199,6 +205,8 @@ impl Settings {
             color: opts.color || config.color,
             shading: opts.shading.unwrap_or(config.three_d.shading),
             wireframe: opts.wireframe || config.three_d.wireframe,
+            simplify: opts.simplify,
+            no_simplify: opts.no_simplify,
             fov_degrees: config.three_d.fov_degrees,
             loop_playback: config.video.loop_playback,
             dither: opts.dither.unwrap_or(config.image.dither),
