@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use rgfx_3d::{OrbitController, Rasterizer, ShadingMode};
 use rgfx_core::{
-    BoundingSphere, Camera, Cell, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
+    BoundingSphere, Camera, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
     TerminalFrame, Viewport,
 };
 use rgfx_terminal::{
@@ -340,10 +340,6 @@ impl ViewerState {
 
     /// Draws the two-line status bar (info + key help) across the bottom rows of `frame`.
     fn overlay_status(&self, frame: &mut TerminalFrame, info: &StatusInfo<'_>) {
-        let rows = frame.rows();
-        if rows == 0 || frame.cols() == 0 {
-            return;
-        }
         let status = format!(
             "{} | {} tris | {:.1} fps | {} | {}{}",
             info.file,
@@ -354,11 +350,7 @@ impl ViewerState {
             if self.color { " | color" } else { "" },
         );
         let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  F:ui  Q:quit";
-
-        if rows >= 2 {
-            write_line(frame, rows - 2, &status);
-        }
-        write_line(frame, rows - 1, help);
+        crate::viewer_chrome::overlay_bottom_bar(frame, &status, help);
     }
 }
 
@@ -372,26 +364,8 @@ struct StatusInfo<'a> {
     fps: f32,
 }
 
-/// Writes `text` (clipped to the frame width) into `row`, blanking the rest of the row so the
-/// overlaid line fully replaces the braille underneath.
-fn write_line(frame: &mut TerminalFrame, row: usize, text: &str) {
-    let cols = frame.cols();
-    if row >= frame.rows() || cols == 0 {
-        return;
-    }
-    let mut col = 0;
-    for ch in text.chars() {
-        if col >= cols {
-            break;
-        }
-        frame.set(col, row, Cell::glyph(ch));
-        col += 1;
-    }
-    while col < cols {
-        frame.set(col, row, Cell::glyph(' '));
-        col += 1;
-    }
-}
+// The bottom-bar row rendering lives in `crate::viewer_chrome` (shared with the image and
+// playback viewers); only the 3D-specific status/help text composition remains above.
 
 /// The index of `mode` within [`SHADING_CYCLE`], or `0` when it is not a cycled mode.
 fn cycle_index(mode: ShadingMode) -> usize {

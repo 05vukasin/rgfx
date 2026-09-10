@@ -39,3 +39,5 @@ New playback features; only surfacing existing state + shared chrome.
 - [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
 **Status:** ⬜ NOT STARTED
+
+**Status:** ✅ DONE (merged)
