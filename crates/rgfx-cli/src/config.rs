@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{DitherMode, RenderOpts, Renderer, Shading};
+use crate::cli::{ColorDepth, DitherMode, RenderOpts, Renderer, Shading};
 
 /// The on-disk configuration file (`config.toml`).
 ///
@@ -175,6 +175,9 @@ pub struct Settings {
     pub fps: u32,
     /// Effective color-output flag.
     pub color: bool,
+    /// Requested color fidelity seed for the interactive color menu (`--color-mode`); `None` means
+    /// "the richest the terminal supports". The effective mode is clamped to the terminal at render.
+    pub color_mode: Option<ColorDepth>,
     /// Effective 3D shading mode.
     pub shading: Shading,
     /// Effective wireframe flag.
@@ -219,6 +222,7 @@ impl Settings {
             width: opts.width.or(config.width),
             fps: opts.fps.unwrap_or(config.fps),
             color: opts.color || config.color,
+            color_mode: opts.color_mode,
             shading: opts.shading.unwrap_or(config.three_d.shading),
             wireframe: opts.wireframe || config.three_d.wireframe,
             fov_degrees: config.three_d.fov_degrees,

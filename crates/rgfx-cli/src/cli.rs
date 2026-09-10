@@ -87,6 +87,14 @@ pub struct RenderOpts {
     #[arg(long)]
     pub color: bool,
 
+    /// Color fidelity when color is on: `16`, `256`, or `true` (truecolor).
+    ///
+    /// Seeds the interactive image color menu's requested mode; the effective mode is always
+    /// clamped down to what the terminal reports it supports. Absent means "the richest the
+    /// terminal supports".
+    #[arg(long, value_enum, value_name = "DEPTH")]
+    pub color_mode: Option<ColorDepth>,
+
     /// Dithering algorithm applied before a 1-bit (Braille) encoder thresholds the image.
     #[arg(long, value_enum, value_name = "MODE")]
     pub dither: Option<DitherMode>,
@@ -140,6 +148,23 @@ pub enum DitherMode {
     Atkinson,
     /// Ordered (4×4 Bayer) dithering.
     Bayer,
+}
+
+/// Requested ANSI color fidelity (`--color-mode`).
+///
+/// Mirrors the three colored [`rgfx_terminal::ColorMode`] variants; the CLI value strings are the
+/// bit/entry counts (`16`, `256`) and `true` for 24-bit truecolor.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorDepth {
+    /// The 16-color ANSI palette.
+    #[value(name = "16")]
+    Ansi16,
+    /// The 256-color xterm palette.
+    #[value(name = "256")]
+    Ansi256,
+    /// 24-bit truecolor.
+    #[value(name = "true", alias = "truecolor")]
+    True,
 }
 
 /// Terminal encoder selection.
