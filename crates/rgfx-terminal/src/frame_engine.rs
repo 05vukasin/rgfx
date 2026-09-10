@@ -124,10 +124,25 @@ impl FrameEngine {
     }
 
     /// Appends a full-frame redraw (clear + home + the whole serialized grid) to the scratch buffer.
+    ///
+    /// The interactive viewers run in raw mode, where a bare `\n` line-feeds **without** returning
+    /// the cursor to column 0, so relying on the serializer's `\n` row separators would staircase
+    /// every row to the right. Each serialized row is therefore preceded by an absolute cursor move
+    /// (`\x1b[{row+1};1H`), matching the diff path, so the redraw positions correctly in raw mode.
+    /// Cursor moves do not touch SGR state, so the serializer's cross-row color continuity is
+    /// preserved. (File output via [`TerminalFrame::to_text`] is unaffected — it keeps plain `\n`.)
     fn emit_full_redraw(&mut self, next: &TerminalFrame) {
         self.scratch.extend_from_slice(CLEAR_HOME);
+        // The serializer separates rows with a single `\n` (and never emits `\n` within a row), so
+        // splitting on `\n` recovers exactly one segment per grid row, SGR escapes still embedded.
         let bytes = self.serializer.serialize(next);
-        self.scratch.extend_from_slice(&bytes);
+        for (row, line) in bytes.split(|&b| b == b'\n').enumerate() {
+            // Cursor move to (row+1, 1), 1-based: ESC [ <row+1> ; 1 H.
+            self.scratch.extend_from_slice(b"\x1b[");
+            push_uint(&mut self.scratch, row + 1);
+            self.scratch.extend_from_slice(b";1H");
+            self.scratch.extend_from_slice(line);
+        }
     }
 
     /// Appends the changed cell runs of `next` (relative to the front buffer) to the scratch buffer.
@@ -295,6 +310,18 @@ mod tests {
         f
     }
 
+    /// Builds the expected full-redraw bytes for `frame`: clear+home, then every serialized row
+    /// preceded by an absolute cursor move (the raw-mode-safe positioning `emit_full_redraw` uses).
+    fn expected_full_redraw(frame: &TerminalFrame) -> Vec<u8> {
+        let mut expected = b"\x1b[2J\x1b[H".to_vec();
+        let text = frame.to_text();
+        for (row, line) in text.split('\n').enumerate() {
+            expected.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+            expected.extend_from_slice(line.as_bytes());
+        }
+        expected
+    }
+
     #[test]
     fn first_frame_is_a_full_redraw() {
         let mut engine = FrameEngine::new(ColorMode::None);
@@ -302,10 +329,52 @@ mod tests {
         let mut out = RecordingWriter::default();
         engine.render(&frame, &mut out).unwrap();
 
-        let mut expected = b"\x1b[2J\x1b[H".to_vec();
-        expected.extend_from_slice(frame.to_text().as_bytes());
-        assert_eq!(out.data, expected);
+        assert_eq!(out.data, expected_full_redraw(&frame));
         assert_eq!(out.flushes, 1, "one flush for the full redraw");
+    }
+
+    #[test]
+    fn full_redraw_positions_every_row_for_raw_mode() {
+        // Regression for #034: in raw mode a bare `\n` line-feeds without a carriage return, so a
+        // full redraw that joined rows with `\n` staircased. Assert on the emitted BYTES (a PTY
+        // capture that split on `\n` would mask this): every row must be positioned by an absolute
+        // cursor move and there must be no bare `\n` left to staircase.
+        let mut engine = FrameEngine::new(ColorMode::None);
+        let frame = filled(3, 4, 'a');
+        let mut out = RecordingWriter::default();
+        engine.render(&frame, &mut out).unwrap();
+
+        assert!(
+            !out.data.contains(&b'\n'),
+            "full redraw must not emit a bare newline that would staircase in raw mode"
+        );
+        // One `\x1b[<row>;1H` cursor move per grid row (rows are 1-based).
+        for row in 1..=4 {
+            let needle = format!("\x1b[{row};1H").into_bytes();
+            assert!(
+                out.data
+                    .windows(needle.len())
+                    .any(|w| w == needle.as_slice()),
+                "row {row} must be positioned with an absolute cursor move"
+            );
+        }
+    }
+
+    #[test]
+    fn identical_full_redraws_both_position_rows() {
+        // Two consecutive full redraws (forced by a resize between them) must each position rows.
+        let mut engine = FrameEngine::new(ColorMode::None);
+        let frame = filled(2, 3, 'a');
+
+        let mut first = RecordingWriter::default();
+        engine.render(&frame, &mut first).unwrap();
+        assert_eq!(first.data, expected_full_redraw(&frame));
+
+        // A different size forces another full redraw; it too must be positioned per row.
+        let bigger = filled(2, 4, 'a');
+        let mut second = RecordingWriter::default();
+        engine.render(&bigger, &mut second).unwrap();
+        assert_eq!(second.data, expected_full_redraw(&bigger));
     }
 
     #[test]
@@ -399,9 +468,7 @@ mod tests {
         let mut out = RecordingWriter::default();
         engine.render(&c, &mut out).unwrap();
 
-        let mut expected = b"\x1b[2J\x1b[H".to_vec();
-        expected.extend_from_slice(c.to_text().as_bytes());
-        assert_eq!(out.data, expected);
+        assert_eq!(out.data, expected_full_redraw(&c));
     }
 
     #[test]
