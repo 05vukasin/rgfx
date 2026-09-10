@@ -1,1 +1,4 @@
 /target
+
+# rgfx-fix skill-first marker (per-worktree, not committed)
+.claude/.skill-active
