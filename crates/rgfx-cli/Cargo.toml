@@ -27,6 +27,7 @@ rgfx-3d = { path = "../rgfx-3d" }
 rgfx-video = { path = "../rgfx-video" }
 anyhow.workspace = true
 clap.workspace = true
+glam.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json = "1"

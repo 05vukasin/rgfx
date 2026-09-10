@@ -63,6 +63,6 @@ Multiple lights, shadows, specular. Point-light attenuation (this is a single di
 whose direction is what the menu controls).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW (branch `task/035-light-menu-a`)

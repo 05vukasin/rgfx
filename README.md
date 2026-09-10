@@ -1162,10 +1162,28 @@ R                   Reset camera
 W                   Toggle wireframe
 S                   Cycle shading
 C                   Toggle color
-L                   Toggle lighting
+L                   Open / close the light menu (see below)
 F                   Toggle UI mode
 Q / Esc             Quit
 ```
+
+Light menu (press `L` to open a modal panel; while it is open, input drives the light, not the
+camera):
+
+```text
+Left / Right        Azimuth (move the light around the sphere)
+Up / Down           Elevation (raise / lower the light)
+M                   Cycle light mode (viewer ⇄ world)
++ / -               Ambient level (0..1)
+O / Space           Toggle the light on / off
+R                   Reset the light to defaults
+Esc / L             Close the menu
+```
+
+Two light modes control how the light relates to the camera. In **viewer** mode (the default)
+the light is fixed relative to your view: as you orbit, the light stays put on screen and the
+object appears to rotate under it, so different faces catch the light. In **world** mode the
+light is fixed in world space, so the shading stays locked to the object as you orbit.
 
 The viewer opens at a 3/4 angle so a model reads as 3D immediately. `.blend` files are
 supported by exporting to glTF through a headless Blender (requires the `blender` binary on
