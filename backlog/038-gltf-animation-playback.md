@@ -55,6 +55,24 @@ crashing.
 Skeletal skinning, morph targets, animation blending, camera/light animation tracks.
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [x] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ IMPLEMENTED (PR open)
+
+## Implementation notes
+- `rgfx-3d`: added `load_gltf_animated` → `AnimatedScene` (un-baked local meshes + node hierarchy +
+  per-mesh node assignment + `SceneAnimation`s). `NodeTransform`/`Interpolation` public; channels
+  support `LINEAR` + `STEP` (CUBICSPLINE downgraded to linear, tangents dropped); morph-weight
+  channels skipped. `evaluate(anim, t)` → per-node local transforms (pure), `animate_into(anim, t,
+  &mut Scene)` composes parent→child world transforms and bakes world-space vertices into a reused
+  scene buffer. `rest_scene()` matches the static `load_gltf`. `GltfStats` gained
+  `animations: Vec<AnimationInfo>` (name + duration). Skins detected via `has_skinning()` (node
+  motion still plays; per-vertex skinning not applied).
+- `rgfx-cli`: `A` opens an Animation menu (`overlay_panel`): Space play/pause, `L` loop (default on),
+  `←/→` scrub, `↑/↓` select clip, `+/-` speed, `R` reset, `Esc`/`A` close. While playing the loop is
+  time-driven (wakes every ~33 ms, advances the playhead by real elapsed time, loops via
+  `rem_euclid`). Status bar shows `anim:<name> t=..s loop/once`. No animations → menu says
+  "no animations in this file". Static assets unaffected; animated assets skip load-time simplify
+  to keep per-node mesh correspondence.
+- Fixture: `crates/rgfx-3d/tests/assets/animated_triangle.gltf` (embedded buffer, one LINEAR
+  translation channel, 1 s).
