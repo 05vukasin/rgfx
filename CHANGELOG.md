@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Still images now open a full-screen preview with a bottom options bar (renderer/dither/invert/color toggles), matching the 3D viewer; `-c`/`--cat` prints inline like `cat` and returns. (#032)
+
 ### Added
 - 3D viewer: opens at a 3/4 angle (fixes the flat "poorly loaded" first frame), adds a roll axis (`z`/`x`), mouse drag-to-orbit + wheel-zoom, and `.blend` support via headless Blender export. (#031)
 

@@ -49,4 +49,4 @@ GIF/video chrome (task 033). Color-quantization changes (already in 006).
 ## Completion
 - [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ DONE (merged)
