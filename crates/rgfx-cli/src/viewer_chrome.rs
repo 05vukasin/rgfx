@@ -40,6 +40,67 @@ pub(crate) fn overlay_bottom_bar(frame: &mut TerminalFrame, status: &str, help: 
     write_line(frame, rows - 1, help);
 }
 
+/// Overlays a bordered, box-drawn panel at the top-left of `frame`: a `title` row followed by one
+/// row per entry in `lines`, framed by `┌─┐ │ └─┘` borders. Only the panel's own cells are
+/// overwritten, so the render stays visible around it; the panel width tracks the widest line
+/// (clamped to the frame) and any rows past the frame height are dropped. No-op for an empty
+/// frame.
+pub(crate) fn overlay_panel(frame: &mut TerminalFrame, title: &str, lines: &[String]) {
+    let cols = frame.cols();
+    let rows = frame.rows();
+    if cols == 0 || rows == 0 {
+        return;
+    }
+
+    // Panel = 2 borders + 1 leading pad space + widest text (+1 trailing pad implied by the fit).
+    let widest = std::iter::once(title.chars().count())
+        .chain(lines.iter().map(|l| l.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let panel_w = (widest + 4).min(cols).max(2);
+
+    let mut row = 0usize;
+    panel_border(frame, row, panel_w, '┌', '┐');
+    row += 1;
+
+    for text in std::iter::once(title).chain(lines.iter().map(String::as_str)) {
+        if row >= rows {
+            return; // clipped: skip the remaining rows and the bottom border
+        }
+        panel_content(frame, row, panel_w, text);
+        row += 1;
+    }
+
+    if row < rows {
+        panel_border(frame, row, panel_w, '└', '┘');
+    }
+}
+
+/// Draws one horizontal panel border row of width `w` with the given `left`/`right` corner glyphs.
+fn panel_border(frame: &mut TerminalFrame, row: usize, w: usize, left: char, right: char) {
+    for c in 0..w {
+        let ch = if c == 0 {
+            left
+        } else if c == w - 1 {
+            right
+        } else {
+            '─'
+        };
+        frame.set(c, row, Cell::glyph(ch));
+    }
+}
+
+/// Draws one panel content row: vertical borders at the edges and ` text` (leading pad, clipped)
+/// filling the interior.
+fn panel_content(frame: &mut TerminalFrame, row: usize, w: usize, text: &str) {
+    frame.set(0, row, Cell::glyph('│'));
+    frame.set(w - 1, row, Cell::glyph('│'));
+    let mut interior = format!(" {text}").chars().collect::<Vec<_>>().into_iter();
+    for c in 1..w - 1 {
+        frame.set(c, row, Cell::glyph(interior.next().unwrap_or(' ')));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +131,30 @@ mod tests {
         let mut f = TerminalFrame::new(4, 1);
         write_line(&mut f, 5, "nope"); // must not panic
         assert_eq!(f.rows(), 1);
+    }
+
+    #[test]
+    fn overlay_panel_draws_a_bordered_box() {
+        let mut f = TerminalFrame::new(20, 6);
+        overlay_panel(
+            &mut f,
+            "Light",
+            &["mode world".to_string(), "on".to_string()],
+        );
+        let t = f.to_text();
+        let lines: Vec<&str> = t.lines().collect();
+        // Top border starts with the corner + a horizontal run; content rows are bracketed by │.
+        assert!(lines[0].starts_with('┌'));
+        assert!(lines[1].starts_with('│') && lines[1].contains("Light"));
+        assert!(lines[2].contains("mode world"));
+        // A bottom border row is drawn below the content (title + 2 lines => row 4).
+        assert!(lines[4].starts_with('└'));
+    }
+
+    #[test]
+    fn overlay_panel_clips_to_a_short_frame_without_panicking() {
+        let mut f = TerminalFrame::new(8, 1);
+        overlay_panel(&mut f, "Light", &["a".to_string(), "b".to_string()]);
+        assert_eq!(f.rows(), 1); // only the top border fits; no panic
     }
 }

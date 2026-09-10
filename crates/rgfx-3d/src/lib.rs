@@ -51,7 +51,7 @@ pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
 pub use line::draw_line;
 pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;
-pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode};
+pub use raster::{Cull, FrontFace, Rasterizer, ShadingMode, direction_from_azimuth_elevation};
 pub use stl::{StlOptions, StlStats, load_stl, load_stl_with_options};
 
 #[cfg(test)]

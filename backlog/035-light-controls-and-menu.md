@@ -63,6 +63,19 @@ Multiple lights, shadows, specular. Point-light attenuation (this is a single di
 whose direction is what the menu controls).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW (branch `task/035-light-menu-c`)
+
+### Implementation notes
+- Pure helper `rgfx_3d::direction_from_azimuth_elevation(az, el) -> Vec3` (unit vector; +Z at
+  zero, +Y at el = π/2), exported and unit-tested.
+- Viewer-side `LightState` (mode Viewer/World, azimuth, elevation, ambient 0..=1, on/off,
+  `menu_open`). Each render computes the world light direction: Viewer →
+  `camera.view_matrix().inverse().transform_vector3(local)` (light fixed to the view, object
+  rotates under it — the default); World → the direction directly. Fed to the rasterizer via
+  `set_light_direction` + `ambient`; no per-frame allocation.
+- `L` toggles a modal menu. Open: `←/→` azimuth, `↑/↓` elevation, `M` mode, `+/-` ambient,
+  `O`/Space on/off, `R` reset, `Esc`/`L` close (Ctrl+C still quits). Closed: arrows orbit.
+- Menu panel drawn via a new `viewer_chrome::overlay_panel` (box-drawn, top-left). Status bar
+  shows the light mode (or `off`); help line + README updated.

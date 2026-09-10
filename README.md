@@ -1162,7 +1162,7 @@ R                   Reset camera
 W                   Toggle wireframe
 S                   Cycle shading
 C                   Toggle color
-L                   Toggle lighting
+L                   Open / close the light menu
 F                   Toggle UI mode
 Q / Esc             Quit
 ```
@@ -1170,6 +1170,27 @@ Q / Esc             Quit
 The viewer opens at a 3/4 angle so a model reads as 3D immediately. `.blend` files are
 supported by exporting to glTF through a headless Blender (requires the `blender` binary on
 `PATH`, or set `RGFX_BLENDER`).
+
+## Light menu
+
+Press `L` to open a modal light menu. By default the light is in **viewer** mode: it stays
+fixed relative to your view, so as you orbit the object appears to turn *under* a stationary
+light and different faces catch the highlight (the cue that reads the 3D shape). Switch to
+**world** mode to pin the light in world space instead (shading then stays locked to the object
+as you orbit). While the menu is open input drives the light, not the camera:
+
+```text
+Left / Right        Move the light in azimuth
+Up / Down           Move the light in elevation
+M                   Toggle mode (viewer / world)
++ / -               Ambient light level (0..1)
+O / Space           Turn the light on / off
+R                   Reset the light to defaults
+Esc / L             Close the menu
+```
+
+Close the menu (`Esc` or `L`) and the arrow keys orbit the camera again. The status bar shows
+the active light mode (or `off`).
 
 Future:
 

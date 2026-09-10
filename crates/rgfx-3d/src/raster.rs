@@ -312,6 +312,19 @@ fn lambert(normal: Vec3, light_direction: Vec3, ambient: f32) -> f32 {
     (ambient + diffuse).clamp(0.0, 1.0)
 }
 
+/// Builds a unit direction vector from spherical `azimuth` and `elevation` angles (both in
+/// radians), for positioning a directional light on a sphere.
+///
+/// Azimuth rotates around the world `+Y` axis, measured from `+Z` toward `+X`; elevation lifts
+/// the direction above the `XZ` plane toward `+Y`. At `azimuth == elevation == 0` the direction
+/// is `+Z`; at `elevation == π/2` it is `+Y`. The result is always a unit vector, so it can be
+/// handed straight to [`Rasterizer::set_light_direction`].
+pub fn direction_from_azimuth_elevation(azimuth: f32, elevation: f32) -> Vec3 {
+    let (sa, ca) = azimuth.sin_cos();
+    let (se, ce) = elevation.sin_cos();
+    Vec3::new(ce * sa, se, ce * ca)
+}
+
 /// The geometric (face) normal of triangle `(a, b, c)` via the right-hand rule on its winding,
 /// or `Vec3::ZERO` for a degenerate triangle. Used for flat shading and as the fallback normal
 /// when a mesh supplies no per-vertex normals.
@@ -1098,6 +1111,26 @@ mod tests {
     // --- Lighting / shading -----------------------------------------------------------------------
 
     const THIRD: (f32, f32, f32) = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0);
+
+    #[test]
+    fn azimuth_elevation_direction_is_unit_and_in_expected_quadrant() {
+        // Zero angles point straight along +Z.
+        let z = direction_from_azimuth_elevation(0.0, 0.0);
+        assert!((z - Vec3::Z).length() < 1e-6);
+        // Straight up.
+        let up = direction_from_azimuth_elevation(1.23, std::f32::consts::FRAC_PI_2);
+        assert!((up - Vec3::Y).length() < 1e-5);
+        // Upper-front-right: +x, +y, +z all positive, and the vector is unit length.
+        let d = direction_from_azimuth_elevation(0.5, 0.6);
+        assert!(
+            d.x > 0.0 && d.y > 0.0 && d.z > 0.0,
+            "expected +x+y+z, got {d:?}"
+        );
+        assert!((d.length() - 1.0).abs() < 1e-6, "must be a unit vector");
+        // A quarter turn in azimuth swings the horizontal component onto +X.
+        let east = direction_from_azimuth_elevation(std::f32::consts::FRAC_PI_2, 0.0);
+        assert!((east - Vec3::X).length() < 1e-6);
+    }
 
     #[test]
     fn lambert_matches_known_normal_light_pairs() {
