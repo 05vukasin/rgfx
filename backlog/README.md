@@ -85,5 +85,6 @@ a PR against `main`. The integrator (you) merges.
 | 036 | large-mesh-performance | rgfx-3d / rgfx-cli | 013, 022, 015, 017 | ⬜ |
 | 037 | free-360-rotation | rgfx-3d / rgfx-cli | 011, 031, 022 | ⬜ |
 | 038 | gltf-animation-playback | rgfx-3d / rgfx-cli | 017, 022, 035 | ⬜ |
+| 039 | image-color-menu | rgfx-cli | 032, 006, 033 | ⬜ |
 
 Keep this table in sync as tasks progress (or regenerate from the per-file Completion sections).
