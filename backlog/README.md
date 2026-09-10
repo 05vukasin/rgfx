@@ -76,5 +76,9 @@ a PR against `main`. The integrator (you) merges.
 | 027 | packaging-and-release | (root) | 002, 022 | ✅ |
 | 028 | rgfx-ratatui-integration | rgfx-ratatui | 007, 004 | ✅ |
 | 029 | avatar-animation-api | rgfx-core/rgfx-terminal | 004, 007 | ✅ |
+| 030 | responsive-inline-rendering | rgfx-terminal/rgfx-cli | 021 | ✅ |
+| 031 | 3d-viewer-improvements | rgfx-3d/rgfx-cli | 022 | ✅ |
+| 032 | fullscreen-image-preview | rgfx-cli | 021, 030, 007 | ⬜ |
+| 033 | viewer-chrome-and-options-bar | rgfx-cli | 032, 023, 022 | ⬜ |
 
 Keep this table in sync as tasks progress (or regenerate from the per-file Completion sections).
