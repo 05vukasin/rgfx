@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- README: added a terminal demo GIF, a Highlights section, and an interactive-controls quick reference.
+
 ### Changed
 - Still images now open a full-screen preview with a bottom options bar (renderer/dither/invert/color toggles), matching the 3D viewer; `-c`/`--cat` prints inline like `cat` and returns. (#032)
 

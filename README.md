@@ -7,6 +7,44 @@
 
 > **A universal terminal graphics engine for images, video, animation, and interactive 3D model previews — written in Rust.**
 
+## Demo
+
+![rgfx rendering an interactive 3D model as Unicode Braille in the terminal](assets/demo.gif)
+
+<sub>Interactive 3D preview rendered entirely in the terminal — orbit, zoom, shading, and lighting, no GUI.</sub>
+
+## Highlights
+
+- **One command, any medium** — `rgfx <file>` auto-detects images (PNG/JPEG/WebP/BMP), GIFs,
+  video (via FFmpeg), and 3D meshes (OBJ/STL/glTF/GLB, plus `.blend` via a headless Blender export),
+  then opens a responsive terminal viewport.
+- **Interactive 3D viewer** — free-tumbling arcball rotation (all axes, no gimbal lock), zoom, roll,
+  flat/smooth/normals/depth/wireframe shading, automatic framing, and a live FPS/status bar.
+- **A live light menu** (`L`) — move the light in 3D, switch between a view-fixed light (stays put
+  while the model turns) and a world-fixed light, and tune ambient.
+- **A glTF animation menu** (`A`) — play and loop node-transform animations, scrub, change speed,
+  and pick between clips.
+- **Big meshes stay smooth** — heavy models are auto-simplified on load (with a `simplified N→M`
+  note; `--no-simplify` keeps full detail) and rendered at reduced resolution while you interact.
+- **Rich image previews** — Braille / ASCII / Unicode-block encoders, Floyd–Steinberg / Atkinson /
+  Bayer dithering, and a color menu (`C`) for 16 / 256 / true-color output. `-c`/`--cat` prints
+  inline like `cat`; `--output` saves the encoded text.
+- **Embeddable** — a small Rust workspace (`rgfx-core` framebuffer + encoders + software rasterizer)
+  plus a `ratatui` widget, usable over SSH and in other TUIs.
+
+## Controls (interactive viewers)
+
+```text
+3D viewer         arrows / drag  orbit (free 360°)   z / x  roll     + / -  zoom
+                  R reset   W wireframe   S shading   C color   L light menu   A animation menu
+                  F toggle status bar     Q / Esc quit
+
+Image preview     R renderer   D dither   I invert   C color menu   F toggle bar   Q quit
+                  (-c / --cat prints inline instead of the full-screen preview)
+
+GIF / video       Space pause   ← / → seek   R restart   + / - fps   F toggle bar   Q quit
+```
+
 `rgfx` is an open-source terminal rendering project designed to make rich visual media usable directly inside a terminal.
 
 The target user experience is intentionally simple:
