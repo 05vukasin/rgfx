@@ -313,6 +313,11 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.triangles = Some(stats.triangle_count);
             report.materials = Some(stats.material_count);
             report.animations = Some(stats.animation_count);
+            for anim in &stats.animations {
+                report
+                    .notes
+                    .push(format!("animation: {} ({:.2}s)", anim.name, anim.duration));
+            }
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
         MeshFormat::Blend => {
@@ -328,6 +333,11 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.triangles = Some(stats.triangle_count);
             report.materials = Some(stats.material_count);
             report.animations = Some(stats.animation_count);
+            for anim in &stats.animations {
+                report
+                    .notes
+                    .push(format!("animation: {} ({:.2}s)", anim.name, anim.duration));
+            }
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
     }

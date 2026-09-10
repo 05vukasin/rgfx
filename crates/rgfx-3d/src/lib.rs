@@ -49,7 +49,10 @@ pub use framing::{
     DEFAULT_FRAMING_MARGIN, frame_camera, frame_camera_with_margin, orthographic_fit_half_height,
     perspective_fit_distance,
 };
-pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
+pub use gltf::{
+    AnimatedScene, AnimationInfo, GltfStats, Interpolation, NodeTransform, SceneAnimation,
+    load_gltf, load_gltf_animated, load_gltf_with_stats,
+};
 pub use light::direction_from_azimuth_elevation;
 pub use line::draw_line;
 pub use obj::{ObjStats, load_obj};

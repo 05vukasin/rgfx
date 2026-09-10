@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use glam::Vec3;
 use rgfx_3d::{
-    OrbitController, Rasterizer, ShadingMode, direction_from_azimuth_elevation, simplify_scene,
+    AnimatedScene, OrbitController, Rasterizer, ShadingMode, direction_from_azimuth_elevation,
+    simplify_scene,
 };
 use rgfx_core::{
     BoundingSphere, Camera, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
@@ -89,6 +90,17 @@ const DEFAULT_LIGHT_AZIMUTH: f32 = 0.46;
 const DEFAULT_LIGHT_ELEVATION: f32 = 0.56;
 /// Default ambient floor, matching the rasterizer's default so lighting reads the same on load.
 const DEFAULT_AMBIENT: f32 = 0.15;
+
+/// Seconds scrubbed per `←`/`→` press while the animation menu is open.
+const ANIM_SCRUB_STEP: f32 = 0.1;
+/// Multiplier applied to playback speed per `+` press (and its reciprocal per `-`).
+const ANIM_SPEED_STEP: f32 = 1.25;
+/// Playback speed is clamped to this range so it never stalls or runs away.
+const ANIM_MIN_SPEED: f32 = 0.1;
+const ANIM_MAX_SPEED: f32 = 8.0;
+/// Target tick interval while an animation plays: the loop wakes this often to advance time and
+/// redraw (~30 fps), independent of user input.
+const ANIM_TICK: Duration = Duration::from_millis(33);
 
 /// Which frame the light's azimuth/elevation direction is interpreted in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +219,160 @@ impl LightState {
     }
 }
 
+/// Per-animation metadata (name + duration) the menu needs to drive playback. Kept separate from
+/// the [`AnimatedScene`] geometry so the menu state machine is pure and unit-testable under a mock
+/// clock, without loading a real asset.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AnimMeta {
+    /// The animation's display name.
+    name: String,
+    /// The animation's duration in seconds (may be `0.0` for a single-keyframe pose).
+    duration: f32,
+}
+
+/// The viewer-side animation-playback model: which animation is selected, the current playhead
+/// time, play/pause, loop, and speed, plus whether the modal animation menu is open.
+///
+/// Pure state with no terminal or geometry dependency: [`advance`](Self::advance) takes a real
+/// elapsed delta and [`on_menu_key`](Self::on_menu_key) routes menu keys, so playback (including
+/// loop wrap) is unit-testable headlessly under a mock clock.
+#[derive(Clone, Debug)]
+pub(crate) struct AnimState {
+    /// Metadata for each available animation (empty when the file has none).
+    anims: Vec<AnimMeta>,
+    /// Index of the selected animation within [`anims`](Self::anims).
+    selected: usize,
+    /// The current playhead time in seconds.
+    time: f32,
+    /// Whether playback is advancing.
+    playing: bool,
+    /// Whether the playhead wraps to the start at the end (default on — the user wants a loop).
+    looping: bool,
+    /// Playback speed multiplier (`1.0` = real time).
+    speed: f32,
+    /// Whether the modal animation menu is open (captures input while true).
+    menu_open: bool,
+}
+
+impl AnimState {
+    /// Builds the playback state for the given animations. Starts paused at `t = 0`, looping on,
+    /// speed `1.0`, menu closed.
+    pub(crate) fn new(anims: Vec<AnimMeta>) -> Self {
+        Self {
+            anims,
+            selected: 0,
+            time: 0.0,
+            playing: false,
+            looping: true,
+            speed: 1.0,
+            menu_open: false,
+        }
+    }
+
+    /// Whether the file carries at least one animation (the `A` menu is otherwise a no-op message).
+    pub(crate) fn has_animations(&self) -> bool {
+        !self.anims.is_empty()
+    }
+
+    /// The selected animation's metadata, if any.
+    fn current(&self) -> Option<&AnimMeta> {
+        self.anims.get(self.selected)
+    }
+
+    /// The selected animation's duration, or `0.0` when there is none.
+    fn duration(&self) -> f32 {
+        self.current().map_or(0.0, |a| a.duration)
+    }
+
+    /// Whether playback is currently advancing (playing, with a real animation selected).
+    pub(crate) fn is_playing(&self) -> bool {
+        self.playing && self.has_animations()
+    }
+
+    /// Advances the playhead by `dt` seconds of real time (scaled by [`speed`](Self::speed)).
+    /// Returns whether the time changed (so the caller can request a redraw). When looping, the
+    /// time wraps modulo the duration; otherwise it clamps to the end and pauses there.
+    pub(crate) fn advance(&mut self, dt: f32) -> bool {
+        if !self.is_playing() || dt <= 0.0 {
+            return false;
+        }
+        let duration = self.duration();
+        if duration <= 0.0 {
+            return false;
+        }
+        self.time += dt * self.speed;
+        if self.looping {
+            self.time = self.time.rem_euclid(duration);
+        } else if self.time >= duration {
+            self.time = duration;
+            self.playing = false;
+        }
+        true
+    }
+
+    /// Routes a key while the animation menu is open, mutating playback. Returns whether anything
+    /// changed. The open/close keys (`Esc`/`A`) are handled by [`ViewerState::on_key`] first.
+    fn on_menu_key(&mut self, key: KeyEvent) -> bool {
+        let duration = self.duration();
+        match key.code {
+            KeyCode::Char(' ') => self.playing = !self.playing,
+            KeyCode::Char('l') | KeyCode::Char('L') => self.looping = !self.looping,
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.speed = (self.speed * ANIM_SPEED_STEP).clamp(ANIM_MIN_SPEED, ANIM_MAX_SPEED);
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.speed = (self.speed / ANIM_SPEED_STEP).clamp(ANIM_MIN_SPEED, ANIM_MAX_SPEED);
+            }
+            KeyCode::Left => self.scrub(-ANIM_SCRUB_STEP, duration),
+            KeyCode::Right => self.scrub(ANIM_SCRUB_STEP, duration),
+            KeyCode::Up => self.select_prev(),
+            KeyCode::Down => self.select_next(),
+            KeyCode::Char('r') | KeyCode::Char('R') => self.reset(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Scrubs the playhead by `delta` seconds, wrapping when looping and clamping otherwise.
+    fn scrub(&mut self, delta: f32, duration: f32) {
+        if duration <= 0.0 {
+            self.time = 0.0;
+            return;
+        }
+        self.time = if self.looping {
+            (self.time + delta).rem_euclid(duration)
+        } else {
+            (self.time + delta).clamp(0.0, duration)
+        };
+    }
+
+    /// Selects the previous animation (wrapping), resetting the playhead to its start.
+    fn select_prev(&mut self) {
+        if self.anims.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + self.anims.len() - 1) % self.anims.len();
+        self.time = 0.0;
+    }
+
+    /// Selects the next animation (wrapping), resetting the playhead to its start.
+    fn select_next(&mut self) {
+        if self.anims.is_empty() {
+            return;
+        }
+        self.selected = (self.selected + 1) % self.anims.len();
+        self.time = 0.0;
+    }
+
+    /// Resets the playhead to `0`, speed to `1.0`, and loop on, keeping the selection and the menu
+    /// open/closed as they were.
+    fn reset(&mut self) {
+        self.time = 0.0;
+        self.speed = 1.0;
+        self.looping = true;
+    }
+}
+
 /// A loaded scene together with the simplification that was (or was not) applied on load.
 struct Loaded {
     /// The scene actually rendered — simplified when [`simplify_note`](Self::simplify_note) is set.
@@ -214,6 +380,10 @@ struct Loaded {
     /// `Some((original_tris, simplified_tris))` when the mesh was decimated on load, so the status
     /// bar can surface the change; `None` when it was rendered at full detail.
     simplify_note: Option<(usize, usize)>,
+    /// The un-baked animation data, when the (glTF) asset carries ≥1 animation. Playing an
+    /// animation rebuilds the scene's world-space vertices each frame from this. `None` for static
+    /// assets (and all non-glTF formats), which renders the baked [`scene`](Self::scene) as before.
+    animation: Option<AnimatedScene>,
 }
 
 /// Runs the 3D viewer for a request. Entry point called by the dispatch layer.
@@ -237,14 +407,28 @@ pub fn view(request: &ViewRequest<'_>, format: MeshFormat) -> anyhow::Result<()>
 /// original scene's triangle count is preserved in the returned [`Loaded::simplify_note`] — the
 /// `rgfx info` path loads independently, so it always reports the true on-disk counts.
 fn load_scene(path: &Path, format: MeshFormat, settings: &Settings) -> anyhow::Result<Loaded> {
+    // For glTF, also load the un-baked animation data. If it carries animations we render from it
+    // (the rest pose as the base scene) and keep it for playback.
+    let mut animation = None;
     let scene =
         match format {
             MeshFormat::Obj => rgfx_3d::load_obj(path)
                 .with_context(|| format!("loading OBJ {}", path.display()))?,
             MeshFormat::Stl => rgfx_3d::load_stl(path)
                 .with_context(|| format!("loading STL {}", path.display()))?,
-            MeshFormat::Gltf => rgfx_3d::load_gltf(path)
-                .with_context(|| format!("loading glTF {}", path.display()))?,
+            MeshFormat::Gltf => {
+                let animated = rgfx_3d::load_gltf_animated(path)
+                    .with_context(|| format!("loading glTF {}", path.display()))?;
+                if animated.has_animations() {
+                    let scene = animated.rest_scene();
+                    animation = Some(animated);
+                    scene
+                } else {
+                    // No animation: fall back to the static baked loader (identical geometry).
+                    rgfx_3d::load_gltf(path)
+                        .with_context(|| format!("loading glTF {}", path.display()))?
+                }
+            }
             MeshFormat::Blend => rgfx_3d::load_blend(path).with_context(|| {
                 format!(
                     "loading Blender file {} (via headless export)",
@@ -253,26 +437,32 @@ fn load_scene(path: &Path, format: MeshFormat, settings: &Settings) -> anyhow::R
             })?,
         };
 
+    // Simplification decimates vertices, which would desync the per-node mesh correspondence the
+    // animation path relies on; leave animated assets at full detail.
     let total = scene.triangle_count();
-    match simplify_target(total, settings) {
-        Some(target) if target < total => {
-            let simplified = simplify_scene(&scene, target);
-            let new_tris = simplified.triangle_count();
-            tracing::info!(
-                original = total,
-                simplified = new_tris,
-                "simplified mesh on load"
-            );
-            Ok(Loaded {
-                scene: simplified,
-                simplify_note: Some((total, new_tris)),
-            })
+    if animation.is_none() {
+        if let Some(target) = simplify_target(total, settings) {
+            if target < total {
+                let simplified = simplify_scene(&scene, target);
+                let new_tris = simplified.triangle_count();
+                tracing::info!(
+                    original = total,
+                    simplified = new_tris,
+                    "simplified mesh on load"
+                );
+                return Ok(Loaded {
+                    scene: simplified,
+                    simplify_note: Some((total, new_tris)),
+                    animation: None,
+                });
+            }
         }
-        _ => Ok(Loaded {
-            scene,
-            simplify_note: None,
-        }),
     }
+    Ok(Loaded {
+        scene,
+        simplify_note: None,
+        animation,
+    })
 }
 
 /// Decides the triangle target for a mesh with `total` triangles under `settings`, or `None` to
@@ -369,6 +559,9 @@ pub(crate) struct ViewerState {
     color: bool,
     /// The directional-light model (mode, azimuth/elevation, ambient, on/off) and its modal menu.
     light: LightState,
+    /// The animation-playback model (selection, playhead, play/pause, loop, speed) and its modal
+    /// menu. Empty (no animations) for static assets; the `A` menu then reports as much.
+    anim: AnimState,
     /// Whether the status bar / key help overlay is shown.
     show_ui: bool,
     /// The last pointer cell while a left-drag is in progress, for drag-to-orbit deltas.
@@ -401,12 +594,39 @@ impl ViewerState {
             wireframe: settings.wireframe,
             color: settings.color,
             light: LightState::new(),
+            anim: AnimState::new(Vec::new()),
             show_ui: true,
             last_drag: None,
             scratch: Framebuffer::new(0, 0),
         };
         state.update_clip();
         state
+    }
+
+    /// Attaches the asset's animations (name + duration each), enabling the animation menu. Called
+    /// once after construction when the loaded asset carries animations.
+    pub(crate) fn set_animations(&mut self, anims: Vec<AnimMeta>) {
+        self.anim = AnimState::new(anims);
+    }
+
+    /// Whether playback is currently advancing (see [`AnimState::is_playing`]).
+    pub(crate) fn anim_is_playing(&self) -> bool {
+        self.anim.is_playing()
+    }
+
+    /// Advances the animation playhead by `dt` real seconds; returns whether the time changed.
+    pub(crate) fn advance_anim(&mut self, dt: f32) -> bool {
+        self.anim.advance(dt)
+    }
+
+    /// The selected animation index (for [`AnimatedScene::animate_into`]).
+    pub(crate) fn anim_selected(&self) -> usize {
+        self.anim.selected
+    }
+
+    /// The current playhead time in seconds.
+    pub(crate) fn anim_time(&self) -> f32 {
+        self.anim.time
     }
 
     /// The effective shading mode, resolving the wireframe and lighting toggles over the cycled
@@ -452,6 +672,24 @@ impl ViewerState {
             };
         }
 
+        // While the animation menu is open it captures input: Esc/A close it, everything else
+        // drives playback (never the camera or a plain-key quit). Ctrl+C already returned above.
+        if self.anim.menu_open {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.anim.menu_open = false;
+                    KeyAction::Redraw
+                }
+                _ => {
+                    if self.anim.on_menu_key(key) {
+                        KeyAction::Redraw
+                    } else {
+                        KeyAction::Ignore
+                    }
+                }
+            };
+        }
+
         if is_quit(key) {
             return KeyAction::Quit;
         }
@@ -471,6 +709,7 @@ impl ViewerState {
             }
             KeyCode::Char('c') | KeyCode::Char('C') => self.color = !self.color,
             KeyCode::Char('l') | KeyCode::Char('L') => self.light.menu_open = true,
+            KeyCode::Char('a') | KeyCode::Char('A') => self.anim.menu_open = true,
             KeyCode::Char('f') | KeyCode::Char('F') => self.show_ui = !self.show_ui,
             _ => return KeyAction::Ignore,
         }
@@ -612,10 +851,13 @@ impl ViewerState {
                 self.overlay_status(&mut frame, info);
             }
         }
-        // The modal light menu draws over everything (even with the status bar hidden) since the
-        // user explicitly opened it.
+        // The modal menus draw over everything (even with the status bar hidden) since the user
+        // explicitly opened them.
         if self.light.menu_open {
             self.overlay_light_menu(&mut frame);
+        }
+        if self.anim.menu_open {
+            self.overlay_anim_menu(&mut frame);
         }
         Ok(frame)
     }
@@ -632,8 +874,21 @@ impl ViewerState {
             Some((orig, new)) => format!("{orig}\u{2192}{new} tris (simplified)"),
             None => format!("{} tris", info.triangles),
         };
+        // When the asset has animations, surface the playhead/loop state on the status line.
+        let anim = if self.anim.has_animations() {
+            let a = &self.anim;
+            let name = a.current().map(|m| m.name.as_str()).unwrap_or("");
+            format!(
+                " | anim:{name} t={:.1}s {}{}",
+                a.time,
+                if a.looping { "loop" } else { "once" },
+                if a.playing { " play" } else { " pause" },
+            )
+        } else {
+            String::new()
+        };
         let status = format!(
-            "{} | {} | {:.1} fps | {} | {}{} | {}",
+            "{} | {} | {:.1} fps | {} | {}{} | {}{}",
             info.file,
             tris,
             info.fps,
@@ -641,9 +896,44 @@ impl ViewerState {
             shading_name(self.effective_shading()),
             if self.color { " | color" } else { "" },
             light,
+            anim,
         );
-        let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light-menu  F:ui  Q:quit";
+        let help = if self.anim.has_animations() {
+            "arrows:orbit  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  A:anim  F:ui  Q:quit"
+        } else {
+            "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light-menu  F:ui  Q:quit"
+        };
         crate::viewer_chrome::overlay_bottom_bar(frame, &status, help);
+    }
+
+    /// Draws the modal animation-menu panel (selection, playhead, play/pause, loop, speed, and key
+    /// help) floating near the top-left of `frame`. When the asset has no animations it reports
+    /// exactly that instead.
+    fn overlay_anim_menu(&self, frame: &mut TerminalFrame) {
+        let a = &self.anim;
+        let lines = if let Some(cur) = a.current() {
+            let idx = format!("{}/{}", a.selected + 1, a.anims.len());
+            vec![
+                "Animation menu".to_string(),
+                format!("clip:   {} ({idx})", cur.name),
+                format!("time:   {:.2}s / {:.2}s", a.time, cur.duration),
+                format!("state:  {}", if a.playing { "playing" } else { "paused" }),
+                format!("loop:   {}", if a.looping { "on" } else { "off" }),
+                format!("speed:  {:.2}x", a.speed),
+                String::new(),
+                "Space play/pause   L loop".to_string(),
+                "\u{2190}/\u{2192} scrub   \u{2191}/\u{2193} clip".to_string(),
+                "+/- speed   R reset   Esc/A close".to_string(),
+            ]
+        } else {
+            vec![
+                "Animation menu".to_string(),
+                "no animations in this file".to_string(),
+                String::new(),
+                "Esc/A close".to_string(),
+            ]
+        };
+        crate::viewer_chrome::overlay_panel(frame, 1, 1, &lines);
     }
 
     /// Draws the modal light-menu panel (mode, azimuth/elevation, ambient, on/off, and key help)
@@ -785,13 +1075,49 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
 
     let mut viewport = session.viewport()?;
     let mut state = ViewerState::new(sphere, settings, viewport);
+    // Enable the animation menu when the asset carries animations.
+    let animated = loaded.animation.as_ref();
+    if let Some(a) = animated {
+        state.set_animations(
+            a.animations()
+                .iter()
+                .map(|anim| AnimMeta {
+                    name: anim.name().to_string(),
+                    duration: anim.duration(),
+                })
+                .collect(),
+        );
+        if a.has_skinning() {
+            tracing::info!(
+                "glTF asset declares skins; playing node motion only (skinning not applied)"
+            );
+        }
+    }
+    // Reused per-frame scene buffer: the posed (world-space) geometry at the current playhead is
+    // baked into this each frame while animating, avoiding per-frame allocation.
+    let mut posed = Scene::default();
     let mut dirty = true;
     // While `interacting`, render at reduced resolution and poll with a short idle timeout so the
     // loop wakes to upgrade the frame to full resolution shortly after input stops.
     let mut interacting = false;
     let mut fps = 0.0f32;
+    // Baseline for the time-driven animation tick; reset whenever playback is not advancing so
+    // resuming never jumps.
+    let mut last_tick = Instant::now();
 
     loop {
+        // Advance the animation playhead by real elapsed time while playing, then redraw.
+        if state.anim_is_playing() {
+            let now = Instant::now();
+            let dt = now.duration_since(last_tick).as_secs_f32();
+            last_tick = now;
+            if state.advance_anim(dt) {
+                dirty = true;
+            }
+        } else {
+            last_tick = Instant::now();
+        }
+
         if dirty {
             let started = Instant::now();
             let info = StatusInfo {
@@ -800,9 +1126,17 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
                 fps,
                 simplify,
             };
+            // When the asset is animated, pose its geometry at the current playhead into the reused
+            // buffer; otherwise render the static scene directly.
+            let render_scene: &Scene = if let Some(a) = animated {
+                a.animate_into(state.anim_selected(), state.anim_time(), &mut posed);
+                &posed
+            } else {
+                scene
+            };
             let downscale = if interacting { INTERACT_DOWNSCALE } else { 1 };
             let frame = state.render_scaled(
-                scene,
+                render_scene,
                 viewport,
                 &mut fb,
                 engine.mode(),
@@ -817,8 +1151,11 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
             dirty = false;
         }
 
-        // Poll quickly while interacting so we can restore full resolution promptly once idle.
-        let timeout = if interacting {
+        // While playing, wake on a fixed tick to advance time; otherwise poll quickly when
+        // interacting (to restore full resolution) or slowly when fully idle.
+        let timeout = if state.anim_is_playing() {
+            ANIM_TICK
+        } else if interacting {
             INTERACT_IDLE
         } else {
             POLL_TIMEOUT
@@ -1477,6 +1814,210 @@ mod tests {
         assert!(
             text.contains("705000\u{2192}150000") && text.contains("simplified"),
             "status bar must surface the N->M simplification"
+        );
+    }
+
+    // --- Animation playback state machine (mock clock) --------------------------------------------
+
+    fn meta(name: &str, duration: f32) -> AnimMeta {
+        AnimMeta {
+            name: name.to_string(),
+            duration,
+        }
+    }
+
+    /// A viewer with two animations attached, for the menu/playback tests.
+    fn anim_state() -> ViewerState {
+        let mut s = state(Viewport::new(40, 20));
+        s.set_animations(vec![meta("walk", 2.0), meta("wave", 1.0)]);
+        s
+    }
+
+    #[test]
+    fn play_pause_and_loop_toggle_via_menu() {
+        let mut a = AnimState::new(vec![meta("walk", 2.0)]);
+        assert!(!a.playing && a.looping);
+        assert!(a.on_menu_key(key(KeyCode::Char(' '))));
+        assert!(a.playing, "space starts playback");
+        assert!(a.on_menu_key(key(KeyCode::Char('l'))));
+        assert!(!a.looping, "l toggles loop off");
+        assert!(a.on_menu_key(key(KeyCode::Char(' '))));
+        assert!(!a.playing, "space pauses");
+    }
+
+    #[test]
+    fn advance_wraps_when_looping_and_clamps_when_not() {
+        // Looping: time wraps modulo duration under a mock clock.
+        let mut a = AnimState::new(vec![meta("walk", 2.0)]);
+        a.playing = true;
+        assert!(a.advance(1.5));
+        assert!((a.time - 1.5).abs() < 1e-6);
+        assert!(a.advance(1.0)); // 2.5 -> wrap to 0.5
+        assert!((a.time - 0.5).abs() < 1e-6, "looping wraps, got {}", a.time);
+        assert!(a.playing, "looping keeps playing");
+
+        // Non-looping: time clamps to the end and playback stops.
+        let mut b = AnimState::new(vec![meta("walk", 2.0)]);
+        b.playing = true;
+        b.looping = false;
+        assert!(b.advance(5.0));
+        assert!((b.time - 2.0).abs() < 1e-6, "clamps to duration");
+        assert!(!b.playing, "stops at the end when not looping");
+        // Further advance does nothing once paused.
+        assert!(!b.advance(1.0));
+    }
+
+    #[test]
+    fn advance_is_inert_when_paused_or_zero_duration() {
+        let mut a = AnimState::new(vec![meta("pose", 0.0)]);
+        a.playing = true;
+        assert!(!a.advance(1.0), "zero-duration clip never advances");
+        let mut b = AnimState::new(vec![meta("walk", 2.0)]); // paused by default
+        assert!(!b.advance(1.0));
+        assert!(b.time == 0.0);
+    }
+
+    #[test]
+    fn speed_scales_and_clamps() {
+        let mut a = AnimState::new(vec![meta("walk", 2.0)]);
+        a.playing = true;
+        for _ in 0..40 {
+            a.on_menu_key(key(KeyCode::Char('+')));
+        }
+        assert!((a.speed - ANIM_MAX_SPEED).abs() < 1e-3, "speed clamps high");
+        for _ in 0..80 {
+            a.on_menu_key(key(KeyCode::Char('-')));
+        }
+        assert!((a.speed - ANIM_MIN_SPEED).abs() < 1e-3, "speed clamps low");
+    }
+
+    #[test]
+    fn scrub_and_select_clip() {
+        let mut a = AnimState::new(vec![meta("walk", 2.0), meta("wave", 1.0)]);
+        // Scrub right advances time; left wraps below zero to near the end (looping).
+        a.on_menu_key(key(KeyCode::Right));
+        assert!((a.time - ANIM_SCRUB_STEP).abs() < 1e-6);
+        a.on_menu_key(key(KeyCode::Left));
+        a.on_menu_key(key(KeyCode::Left));
+        assert!(a.time > 1.0, "scrub left wraps past zero when looping");
+
+        // Down/Up select the next/previous clip and reset the playhead.
+        assert_eq!(a.selected, 0);
+        a.on_menu_key(key(KeyCode::Down));
+        assert_eq!(a.selected, 1);
+        assert_eq!(a.time, 0.0, "selecting a clip resets the playhead");
+        a.on_menu_key(key(KeyCode::Down));
+        assert_eq!(a.selected, 0, "selection wraps");
+        a.on_menu_key(key(KeyCode::Up));
+        assert_eq!(a.selected, 1, "up wraps back");
+    }
+
+    #[test]
+    fn reset_restores_speed_time_and_loop_keeping_selection() {
+        let mut a = AnimState::new(vec![meta("walk", 2.0), meta("wave", 1.0)]);
+        a.selected = 1;
+        a.time = 0.7;
+        a.speed = 4.0;
+        a.looping = false;
+        a.on_menu_key(key(KeyCode::Char('r')));
+        assert_eq!(a.time, 0.0);
+        assert!((a.speed - 1.0).abs() < 1e-6);
+        assert!(a.looping);
+        assert_eq!(a.selected, 1, "reset keeps the selected clip");
+    }
+
+    #[test]
+    fn menu_routes_keys_to_playback_and_freezes_camera() {
+        let mut s = anim_state();
+        // `A` opens the modal menu.
+        let orient0 = s.controls.orientation();
+        assert_eq!(s.on_key(key(KeyCode::Char('a'))), KeyAction::Redraw);
+        assert!(s.anim.menu_open);
+
+        // Open: Space plays, arrows scrub/select — the camera orbit is frozen.
+        assert_eq!(s.on_key(key(KeyCode::Char(' '))), KeyAction::Redraw);
+        assert!(s.anim.playing);
+        assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
+        assert!(s.anim.time > 0.0);
+        assert_eq!(
+            s.controls.orientation(),
+            orient0,
+            "camera must not orbit while the animation menu is open"
+        );
+
+        // `Esc` closes; arrows orbit the camera again.
+        assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Redraw);
+        assert!(!s.anim.menu_open);
+        let before = s.controls.orientation();
+        s.on_key(key(KeyCode::Left));
+        assert_ne!(
+            s.controls.orientation(),
+            before,
+            "camera orbits again once the menu closes"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_with_the_anim_menu_open() {
+        let mut s = anim_state();
+        s.on_key(key(KeyCode::Char('a')));
+        assert!(s.anim.menu_open);
+        assert_eq!(
+            s.on_key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    ..KeyModifiers::NONE
+                },
+            }),
+            KeyAction::Quit
+        );
+    }
+
+    #[test]
+    fn open_anim_menu_draws_panel_and_status_line() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(120, 24);
+        let mut fb = Framebuffer::new(0, 0);
+        let mut s = anim_state();
+        s.on_key(key(KeyCode::Char('a'))); // open the menu
+
+        let info = StatusInfo {
+            file: "walk.glb",
+            triangles: 12,
+            fps: 60.0,
+            simplify: None,
+        };
+        let frame = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, Some(&info))
+            .unwrap();
+        let text = frame.to_text();
+        assert!(
+            text.contains("Animation menu"),
+            "the modal animation panel must be drawn while open"
+        );
+        assert!(
+            text.contains("anim:walk") && text.contains("loop"),
+            "status line must show the clip name and loop state"
+        );
+    }
+
+    #[test]
+    fn no_animations_menu_reports_it_clearly() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(60, 24);
+        let mut fb = Framebuffer::new(0, 0);
+        let mut s = state(viewport); // no animations attached
+        assert!(!s.anim.has_animations());
+        s.on_key(key(KeyCode::Char('a'))); // opens, but there is nothing to play
+        assert!(s.anim.menu_open);
+
+        let frame = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap();
+        assert!(
+            frame.to_text().contains("no animations in this file"),
+            "the menu must say there are no animations"
         );
     }
 }
