@@ -20,7 +20,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use rgfx_3d::{OrbitController, Rasterizer, ShadingMode};
+use glam::Vec3;
+use rgfx_3d::{OrbitController, Rasterizer, ShadingMode, direction_from_azimuth_elevation};
 use rgfx_core::{
     BoundingSphere, Camera, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
     TerminalFrame, Viewport,
@@ -73,6 +74,136 @@ const SHADING_CYCLE: [ShadingMode; 5] = [
 
 /// The still human-readable renderer name shown in the status bar.
 const RENDERER_NAME: &str = "braille";
+
+/// Radians the light's azimuth/elevation moves per arrow press while the light menu is open.
+const LIGHT_ANGLE_STEP: f32 = 0.15;
+/// Ambient light delta applied per `+`/`-` press while the light menu is open.
+const AMBIENT_STEP: f32 = 0.05;
+/// Elevation is clamped to just short of the poles so the light never degenerates onto the axis.
+const MAX_LIGHT_ELEVATION: f32 = 1.5;
+/// Default light azimuth (upper-front-right), chosen to match the rasterizer's default direction.
+const DEFAULT_LIGHT_AZIMUTH: f32 = 0.46;
+/// Default light elevation (upper-front-right), chosen to match the rasterizer's default direction.
+const DEFAULT_LIGHT_ELEVATION: f32 = 0.56;
+/// Default ambient floor, matching the rasterizer's default so lighting reads the same on load.
+const DEFAULT_AMBIENT: f32 = 0.15;
+
+/// Which frame the light's azimuth/elevation direction is interpreted in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LightMode {
+    /// The direction is fixed *relative to the camera*: it is transformed by the inverse view
+    /// matrix into world space each frame, so the light stays put on screen and the object appears
+    /// to rotate under a stationary light. This is the default.
+    Viewer,
+    /// The direction is a fixed *world-space* direction: shading stays constant as the camera
+    /// orbits (the light appears glued to the object).
+    World,
+}
+
+impl LightMode {
+    /// The other mode (used by the `M` toggle).
+    fn toggled(self) -> Self {
+        match self {
+            LightMode::Viewer => LightMode::World,
+            LightMode::World => LightMode::Viewer,
+        }
+    }
+
+    /// A short lower-case name for the status bar / menu.
+    fn name(self) -> &'static str {
+        match self {
+            LightMode::Viewer => "viewer",
+            LightMode::World => "world",
+        }
+    }
+}
+
+/// The viewer-side directional-light model: where the light sits (azimuth/elevation), how its
+/// direction is interpreted ([`LightMode`]), the ambient floor, whether it is on, and whether the
+/// modal light menu is open. Pure state with no terminal dependency, so the menu's key routing and
+/// the per-mode world-direction math are unit-testable headlessly.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LightState {
+    /// How the azimuth/elevation direction is interpreted (viewer- vs world-fixed).
+    mode: LightMode,
+    /// Azimuth around the vertical axis, in radians (wraps freely).
+    azimuth: f32,
+    /// Elevation above the horizontal plane, in radians (clamped near the poles).
+    elevation: f32,
+    /// Ambient floor in `0.0..=1.0`, handed to the rasterizer.
+    ambient: f32,
+    /// Whether directional lighting is applied (the quick on/off, now inside the menu).
+    on: bool,
+    /// Whether the modal light menu is open (captures input while true).
+    menu_open: bool,
+}
+
+impl LightState {
+    /// The default light: viewer-fixed, upper-front-right, low ambient, on, menu closed.
+    fn new() -> Self {
+        Self {
+            mode: LightMode::Viewer,
+            azimuth: DEFAULT_LIGHT_AZIMUTH,
+            elevation: DEFAULT_LIGHT_ELEVATION,
+            ambient: DEFAULT_AMBIENT,
+            on: true,
+            menu_open: false,
+        }
+    }
+
+    /// Restores the light to its defaults, leaving the menu open/closed as it was.
+    fn reset(&mut self) {
+        let menu_open = self.menu_open;
+        *self = Self::new();
+        self.menu_open = menu_open;
+    }
+
+    /// Sets the ambient level, clamped to `0.0..=1.0`.
+    fn set_ambient(&mut self, ambient: f32) {
+        self.ambient = ambient.clamp(0.0, 1.0);
+    }
+
+    /// The world-space direction handed to the rasterizer for the current mode and camera. In
+    /// [`LightMode::Viewer`] the azimuth/elevation direction is treated as camera-space and mapped
+    /// to world space by the inverse view matrix (so it stays fixed on screen); in
+    /// [`LightMode::World`] it is already the world direction.
+    fn world_direction(&self, camera: &Camera) -> Vec3 {
+        let dir = direction_from_azimuth_elevation(self.azimuth, self.elevation);
+        match self.mode {
+            LightMode::Viewer => camera.view_matrix().inverse().transform_vector3(dir),
+            LightMode::World => dir,
+        }
+    }
+
+    /// Routes a key while the menu is open, mutating the light. Returns whether anything changed
+    /// (so the caller can request a redraw). The menu open/close keys (`Esc`/`L`) are handled by
+    /// [`ViewerState::on_key`] before this is reached.
+    fn on_menu_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Left => self.azimuth -= LIGHT_ANGLE_STEP,
+            KeyCode::Right => self.azimuth += LIGHT_ANGLE_STEP,
+            KeyCode::Up => {
+                self.elevation = (self.elevation + LIGHT_ANGLE_STEP)
+                    .clamp(-MAX_LIGHT_ELEVATION, MAX_LIGHT_ELEVATION);
+            }
+            KeyCode::Down => {
+                self.elevation = (self.elevation - LIGHT_ANGLE_STEP)
+                    .clamp(-MAX_LIGHT_ELEVATION, MAX_LIGHT_ELEVATION);
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => self.mode = self.mode.toggled(),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.set_ambient(self.ambient + AMBIENT_STEP)
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.set_ambient(self.ambient - AMBIENT_STEP)
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char(' ') => self.on = !self.on,
+            KeyCode::Char('r') | KeyCode::Char('R') => self.reset(),
+            _ => return false,
+        }
+        true
+    }
+}
 
 /// Runs the 3D viewer for a request. Entry point called by the dispatch layer.
 pub fn view(request: &ViewRequest<'_>, format: MeshFormat) -> anyhow::Result<()> {
@@ -155,8 +286,8 @@ pub(crate) struct ViewerState {
     wireframe: bool,
     /// Whether ANSI color output is enabled (attaches per-cell foreground colors).
     color: bool,
-    /// Whether directional lighting is applied to the lit shading modes.
-    lighting: bool,
+    /// The directional-light model (mode, azimuth/elevation, ambient, on/off) and its modal menu.
+    light: LightState,
     /// Whether the status bar / key help overlay is shown.
     show_ui: bool,
     /// The last pointer cell while a left-drag is in progress, for drag-to-orbit deltas.
@@ -184,7 +315,7 @@ impl ViewerState {
             shading_index,
             wireframe: settings.wireframe,
             color: settings.color,
-            lighting: true,
+            light: LightState::new(),
             show_ui: true,
             last_drag: None,
         };
@@ -199,7 +330,7 @@ impl ViewerState {
             return ShadingMode::Wireframe;
         }
         let base = SHADING_CYCLE[self.shading_index];
-        if !self.lighting && matches!(base, ShadingMode::Flat | ShadingMode::Smooth) {
+        if !self.light.on && matches!(base, ShadingMode::Flat | ShadingMode::Smooth) {
             ShadingMode::Unlit
         } else {
             base
@@ -207,7 +338,34 @@ impl ViewerState {
     }
 
     /// Applies a key press, updating the camera or toggles and reporting what the loop should do.
+    ///
+    /// The modal light menu takes priority: `L` opens/closes it, and while it is open the arrows
+    /// and light keys drive the light rather than the camera (Ctrl+C still quits). While it is
+    /// closed the arrows orbit the camera as before.
     pub(crate) fn on_key(&mut self, key: KeyEvent) -> KeyAction {
+        // Ctrl+C always quits, even out of the modal menu.
+        if key.modifiers.ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            return KeyAction::Quit;
+        }
+
+        // While the light menu is open it captures input: Esc/L close it, everything else drives
+        // the light (never the camera or a plain-key quit).
+        if self.light.menu_open {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('L') => {
+                    self.light.menu_open = false;
+                    KeyAction::Redraw
+                }
+                _ => {
+                    if self.light.on_menu_key(key) {
+                        KeyAction::Redraw
+                    } else {
+                        KeyAction::Ignore
+                    }
+                }
+            };
+        }
+
         if is_quit(key) {
             return KeyAction::Quit;
         }
@@ -226,7 +384,7 @@ impl ViewerState {
                 self.shading_index = (self.shading_index + 1) % SHADING_CYCLE.len();
             }
             KeyCode::Char('c') | KeyCode::Char('C') => self.color = !self.color,
-            KeyCode::Char('l') | KeyCode::Char('L') => self.lighting = !self.lighting,
+            KeyCode::Char('l') | KeyCode::Char('L') => self.light.menu_open = true,
             KeyCode::Char('f') | KeyCode::Char('F') => self.show_ui = !self.show_ui,
             _ => return KeyAction::Ignore,
         }
@@ -287,7 +445,8 @@ impl ViewerState {
         self.camera.far = (distance + radius).max(self.camera.near + MIN_RADIUS);
     }
 
-    /// Builds the rasterizer for the current toggle state.
+    /// Builds the rasterizer for the current toggle state, including the per-frame world-space
+    /// light direction derived from the light model and the (already synced) camera.
     fn rasterizer(&self) -> Rasterizer {
         let mut ras = Rasterizer::new(self.effective_shading());
         // A soft blue-grey surface reads well both as grayscale luminance and, with `--color`, as a
@@ -298,6 +457,10 @@ impl ViewerState {
             Color::WHITE
         };
         ras.clear_color = Color::TRANSPARENT;
+        // The rasterizer always lights in world space; the light model computes the world direction
+        // for the current mode + camera so a Viewer-fixed light stays put on screen as we orbit.
+        ras.set_light_direction(self.light.world_direction(&self.camera));
+        ras.ambient = self.light.ambient;
         ras
     }
 
@@ -335,22 +498,55 @@ impl ViewerState {
                 self.overlay_status(&mut frame, info);
             }
         }
+        // The modal light menu draws over everything (even with the status bar hidden) since the
+        // user explicitly opened it.
+        if self.light.menu_open {
+            self.overlay_light_menu(&mut frame);
+        }
         Ok(frame)
     }
 
     /// Draws the two-line status bar (info + key help) across the bottom rows of `frame`.
     fn overlay_status(&self, frame: &mut TerminalFrame, info: &StatusInfo<'_>) {
+        let light = if self.light.on {
+            format!("light:{}", self.light.mode.name())
+        } else {
+            "light:off".to_string()
+        };
         let status = format!(
-            "{} | {} tris | {:.1} fps | {} | {}{}",
+            "{} | {} tris | {:.1} fps | {} | {}{} | {}",
             info.file,
             info.triangles,
             info.fps,
             RENDERER_NAME,
             shading_name(self.effective_shading()),
             if self.color { " | color" } else { "" },
+            light,
         );
-        let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  F:ui  Q:quit";
+        let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light-menu  F:ui  Q:quit";
         crate::viewer_chrome::overlay_bottom_bar(frame, &status, help);
+    }
+
+    /// Draws the modal light-menu panel (mode, azimuth/elevation, ambient, on/off, and key help)
+    /// floating near the top-left of `frame`.
+    fn overlay_light_menu(&self, frame: &mut TerminalFrame) {
+        let l = &self.light;
+        // Azimuth wraps, so normalize it to 0..360 for display; elevation stays signed.
+        let az_deg = l.azimuth.to_degrees().rem_euclid(360.0).round() as i32;
+        let el_deg = l.elevation.to_degrees().round() as i32;
+        let lines = vec![
+            "Light menu".to_string(),
+            format!("mode:      {}", l.mode.name()),
+            format!("azimuth:   {az_deg}\u{b0}"),
+            format!("elevation: {el_deg}\u{b0}"),
+            format!("ambient:   {:.2}", l.ambient),
+            format!("light:     {}", if l.on { "on" } else { "off" }),
+            String::new(),
+            "\u{2190}/\u{2192} az   \u{2191}/\u{2193} el   M mode".to_string(),
+            "+/- ambient   O/Space on/off".to_string(),
+            "R reset   Esc/L close".to_string(),
+        ];
+        crate::viewer_chrome::overlay_panel(frame, 1, 1, &lines);
     }
 }
 
@@ -611,11 +807,17 @@ mod tests {
         s.on_key(key(KeyCode::Char('s')));
         assert_ne!(s.effective_shading(), before);
 
-        // Lighting off forces lit modes to Unlit.
+        // Lighting off forces lit modes to Unlit. Lighting on/off now lives in the light menu:
+        // open it with `L`, toggle the light off with `O`, close with `L`.
         s.shading_index = cycle_index(ShadingMode::Flat);
         assert_eq!(s.effective_shading(), ShadingMode::Flat);
         s.on_key(key(KeyCode::Char('l')));
+        assert!(s.light.menu_open);
+        s.on_key(key(KeyCode::Char('o')));
+        assert!(!s.light.on);
         assert_eq!(s.effective_shading(), ShadingMode::Unlit);
+        s.on_key(key(KeyCode::Char('l')));
+        assert!(!s.light.menu_open);
 
         // Color and UI toggle.
         assert!(!s.color);
@@ -784,5 +986,183 @@ mod tests {
         };
         assert_eq!(s.on_mouse(m), KeyAction::Redraw);
         assert!(s.controls.distance() < d0, "scroll up zooms in");
+    }
+
+    // --- Light model + modal menu -----------------------------------------------------------------
+
+    /// A camera at a known orbit position (looking at the origin, +Y up).
+    fn camera_at(position: Vec3) -> Camera {
+        let mut cam = Camera::perspective(1.0, 60_f32.to_radians());
+        cam.position = position;
+        cam.target = Vec3::ZERO;
+        cam
+    }
+
+    #[test]
+    fn viewer_mode_world_direction_rotates_with_the_camera() {
+        // The requested default: a viewer-fixed light yields a *different* world direction at two
+        // orbit angles, so the object appears to rotate under a stationary light.
+        let light = LightState::new();
+        assert_eq!(light.mode, LightMode::Viewer);
+        let front = light.world_direction(&camera_at(Vec3::new(0.0, 0.0, 3.0)));
+        let side = light.world_direction(&camera_at(Vec3::new(3.0, 0.0, 0.0)));
+        assert!(
+            (front - side).length() > 1e-2,
+            "viewer-fixed light must rotate with the camera"
+        );
+        assert!((front.length() - 1.0).abs() < 1e-5, "direction stays unit");
+    }
+
+    #[test]
+    fn world_mode_direction_is_invariant_to_the_camera() {
+        let mut light = LightState::new();
+        light.mode = LightMode::World;
+        let a = light.world_direction(&camera_at(Vec3::new(0.0, 0.0, 3.0)));
+        let b = light.world_direction(&camera_at(Vec3::new(3.0, 1.0, -2.0)));
+        assert!(
+            (a - b).length() < 1e-6,
+            "world-fixed light must not depend on the camera"
+        );
+    }
+
+    #[test]
+    fn menu_routes_arrows_to_light_when_open_and_camera_when_closed() {
+        let mut s = state(Viewport::new(40, 20));
+
+        // Closed: arrows orbit the camera; the light angles are untouched.
+        let yaw0 = s.controls.yaw();
+        let az0 = s.light.azimuth;
+        assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
+        assert!((s.controls.yaw() - (yaw0 + ORBIT_STEP)).abs() < 1e-6);
+        assert_eq!(s.light.azimuth, az0, "closed menu must not move the light");
+
+        // `L` opens the modal menu.
+        assert_eq!(s.on_key(key(KeyCode::Char('l'))), KeyAction::Redraw);
+        assert!(s.light.menu_open);
+
+        // Open: arrows move the light; the camera orbit is frozen.
+        let yaw_frozen = s.controls.yaw();
+        assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
+        assert!((s.light.azimuth - (az0 + LIGHT_ANGLE_STEP)).abs() < 1e-6);
+        assert_eq!(
+            s.controls.yaw(),
+            yaw_frozen,
+            "camera must not orbit while the menu is open"
+        );
+        let el0 = s.light.elevation;
+        s.on_key(key(KeyCode::Up));
+        assert!((s.light.elevation - (el0 + LIGHT_ANGLE_STEP)).abs() < 1e-6);
+
+        // `Esc` closes; arrows orbit the camera again.
+        assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Redraw);
+        assert!(!s.light.menu_open);
+        let yaw_resumed = s.controls.yaw();
+        s.on_key(key(KeyCode::Left));
+        assert!((s.controls.yaw() - (yaw_resumed - ORBIT_STEP)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn menu_mode_toggle_ambient_clamp_onoff_and_reset() {
+        let mut s = state(Viewport::new(40, 20));
+        s.on_key(key(KeyCode::Char('l'))); // open
+
+        // `M` cycles Viewer <-> World.
+        assert_eq!(s.light.mode, LightMode::Viewer);
+        s.on_key(key(KeyCode::Char('m')));
+        assert_eq!(s.light.mode, LightMode::World);
+        s.on_key(key(KeyCode::Char('m')));
+        assert_eq!(s.light.mode, LightMode::Viewer);
+
+        // Ambient is clamped to 0..=1 at both ends.
+        for _ in 0..50 {
+            s.on_key(key(KeyCode::Char('+')));
+        }
+        assert!((s.light.ambient - 1.0).abs() < 1e-6, "ambient clamps at 1");
+        for _ in 0..50 {
+            s.on_key(key(KeyCode::Char('-')));
+        }
+        assert!(s.light.ambient.abs() < 1e-6, "ambient clamps at 0");
+
+        // On/off via `O` and `Space`.
+        assert!(s.light.on);
+        s.on_key(key(KeyCode::Char('o')));
+        assert!(!s.light.on);
+        s.on_key(key(KeyCode::Char(' ')));
+        assert!(s.light.on);
+
+        // Move the light, then `R` restores defaults while keeping the menu open.
+        s.on_key(key(KeyCode::Right));
+        s.on_key(key(KeyCode::Char('m')));
+        s.on_key(key(KeyCode::Char('+')));
+        s.on_key(key(KeyCode::Char('r')));
+        assert_eq!(s.light.mode, LightMode::Viewer);
+        assert!((s.light.azimuth - DEFAULT_LIGHT_AZIMUTH).abs() < 1e-6);
+        assert!((s.light.elevation - DEFAULT_LIGHT_ELEVATION).abs() < 1e-6);
+        assert!((s.light.ambient - DEFAULT_AMBIENT).abs() < 1e-6);
+        assert!(s.light.on);
+        assert!(s.light.menu_open, "reset keeps the menu open");
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_with_the_menu_open() {
+        let mut s = state(Viewport::new(40, 20));
+        s.on_key(key(KeyCode::Char('l')));
+        assert!(s.light.menu_open);
+        assert_eq!(
+            s.on_key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers {
+                    ctrl: true,
+                    ..KeyModifiers::NONE
+                },
+            }),
+            KeyAction::Quit
+        );
+    }
+
+    #[test]
+    fn viewer_light_changes_shading_as_the_object_orbits() {
+        // End-to-end: a lit render differs after orbiting, because the viewer-fixed light catches
+        // different faces as the object turns beneath it.
+        let scene = cube_scene();
+        let viewport = Viewport::new(48, 24);
+        let mut fb = Framebuffer::new(0, 0);
+        let mut s = state(viewport);
+        s.shading_index = cycle_index(ShadingMode::Flat);
+
+        let before = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap()
+            .to_text();
+        for _ in 0..6 {
+            s.on_key(key(KeyCode::Right));
+        }
+        let after = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap()
+            .to_text();
+        assert_ne!(before, after, "orbiting must change the lit render");
+    }
+
+    #[test]
+    fn open_menu_draws_a_panel_over_the_render() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(60, 24);
+        let mut fb = Framebuffer::new(0, 0);
+        let mut s = state(viewport);
+        s.on_key(key(KeyCode::Char('l'))); // open the menu
+
+        let info = StatusInfo {
+            file: "cube",
+            triangles: 12,
+            fps: 60.0,
+        };
+        let frame = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, Some(&info))
+            .unwrap();
+        assert!(
+            frame.to_text().contains("Light menu"),
+            "the modal menu panel must be drawn while open"
+        );
     }
 }

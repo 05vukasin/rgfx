@@ -63,6 +63,19 @@ Multiple lights, shadows, specular. Point-light attenuation (this is a single di
 whose direction is what the menu controls).
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [x] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW (branch `task/035-light-menu-b`)
+
+### Notes
+- `rgfx-3d`: added pure `direction_from_azimuth_elevation(az, el) -> Vec3` (exported + unit-tested:
+  unit length, quadrant, and the `+Z`/`+X`/`+Y` reference angles).
+- `rgfx-cli`: `LightState` (mode/azimuth/elevation/ambient/on/menu_open) on `ViewerState`. Per
+  render `rasterizer()` sets the rasterizer's world-space `light_direction` via
+  `light.world_direction(&camera)` — Viewer mode = `view_matrix().inverse().transform_vector3(dir)`
+  (default, light fixed on screen), World mode = the az/el direction directly. Ambient is forwarded.
+- Modal menu: `L` opens/closes; while open `←/→` azimuth, `↑/↓` elevation, `M` mode, `+/-` ambient,
+  `O`/`Space` on/off, `R` reset (keeps menu open), `Esc`/`L` close. Ctrl+C still quits. Panel drawn
+  via a new `viewer_chrome::overlay_panel` (bordered, floating). Status bar shows `light:<mode>`.
+- No per-frame heap churn in the hot path beyond the existing encode; the menu panel builds its
+  line `Vec` only while open.

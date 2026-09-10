@@ -2138,6 +2138,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "glam",
  "image",
  "rgfx-3d",
  "rgfx-core",
