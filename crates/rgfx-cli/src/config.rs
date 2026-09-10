@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use rgfx_terminal::ColorMode;
+
 use crate::cli::{DitherMode, RenderOpts, Renderer, Shading};
 
 /// The on-disk configuration file (`config.toml`).
@@ -162,6 +164,9 @@ pub struct Settings {
     pub fps: u32,
     /// Effective color-output flag.
     pub color: bool,
+    /// Requested color fidelity to seed the viewer's color menu, or `None` to start at the
+    /// terminal's detected capability.
+    pub color_mode: Option<ColorMode>,
     /// Effective 3D shading mode.
     pub shading: Shading,
     /// Effective wireframe flag.
@@ -197,6 +202,7 @@ impl Settings {
             width: opts.width.or(config.width),
             fps: opts.fps.unwrap_or(config.fps),
             color: opts.color || config.color,
+            color_mode: opts.color_mode.map(|d| d.to_color_mode()),
             shading: opts.shading.unwrap_or(config.three_d.shading),
             wireframe: opts.wireframe || config.three_d.wireframe,
             fov_degrees: config.three_d.fov_degrees,

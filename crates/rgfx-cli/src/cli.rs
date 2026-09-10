@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use rgfx_terminal::ColorMode;
 
 /// Render images, video, animations and 3D meshes directly in your terminal.
 #[derive(Parser, Debug, Clone)]
@@ -73,6 +74,13 @@ pub struct RenderOpts {
     #[arg(long)]
     pub color: bool,
 
+    /// Color fidelity to seed the viewer's color menu with (`16`, `256`, or `true`).
+    ///
+    /// Requesting more fidelity than the terminal advertises is clamped down at render time. When
+    /// unset, the viewer starts at the terminal's detected capability.
+    #[arg(long, value_enum, value_name = "DEPTH")]
+    pub color_mode: Option<ColorDepth>,
+
     /// Dithering algorithm applied before a 1-bit (Braille) encoder thresholds the image.
     #[arg(long, value_enum, value_name = "MODE")]
     pub dither: Option<DitherMode>,
@@ -126,6 +134,32 @@ pub enum DitherMode {
     Atkinson,
     /// Ordered (4×4 Bayer) dithering.
     Bayer,
+}
+
+/// Color fidelity selection for `--color-mode`, mapping onto a [`ColorMode`].
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorDepth {
+    /// The 16-color ANSI palette.
+    #[value(name = "16")]
+    Ansi16,
+    /// The 256-color xterm palette.
+    #[value(name = "256")]
+    Ansi256,
+    /// 24-bit truecolor.
+    #[value(name = "true", alias = "truecolor", alias = "24bit")]
+    True,
+}
+
+impl ColorDepth {
+    /// The [`ColorMode`] this fidelity selects.
+    #[must_use]
+    pub fn to_color_mode(self) -> ColorMode {
+        match self {
+            ColorDepth::Ansi16 => ColorMode::Ansi16,
+            ColorDepth::Ansi256 => ColorMode::Ansi256,
+            ColorDepth::True => ColorMode::TrueColor,
+        }
+    }
 }
 
 /// Terminal encoder selection.
@@ -242,6 +276,32 @@ mod tests {
             }
             other => panic!("expected info subcommand, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn color_mode_flag_parses_each_depth() {
+        assert_eq!(
+            parse(&["rgfx", "x.png", "--color-mode", "16"])
+                .render
+                .color_mode,
+            Some(ColorDepth::Ansi16)
+        );
+        assert_eq!(
+            parse(&["rgfx", "x.png", "--color-mode", "256"])
+                .render
+                .color_mode,
+            Some(ColorDepth::Ansi256)
+        );
+        assert_eq!(
+            parse(&["rgfx", "x.png", "--color-mode", "true"])
+                .render
+                .color_mode,
+            Some(ColorDepth::True)
+        );
+        // Absent flag is None.
+        assert_eq!(parse(&["rgfx", "x.png"]).render.color_mode, None);
+        // The map onto ColorMode is exact.
+        assert_eq!(ColorDepth::True.to_color_mode(), ColorMode::TrueColor);
     }
 
     #[test]
