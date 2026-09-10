@@ -35,6 +35,7 @@
 pub mod blend;
 mod framing;
 pub mod gltf;
+mod light;
 mod line;
 pub mod obj;
 mod orbit;
@@ -48,6 +49,7 @@ pub use framing::{
     perspective_fit_distance,
 };
 pub use gltf::{GltfStats, load_gltf, load_gltf_with_stats};
+pub use light::direction_from_azimuth_elevation;
 pub use line::draw_line;
 pub use obj::{ObjStats, load_obj};
 pub use orbit::OrbitController;

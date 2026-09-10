@@ -1162,10 +1162,26 @@ R                   Reset camera
 W                   Toggle wireframe
 S                   Cycle shading
 C                   Toggle color
-L                   Toggle lighting
+L                   Open / close the light menu
 F                   Toggle UI mode
 Q / Esc             Quit
 ```
+
+While the light menu is open, input drives the light instead of the camera:
+
+```text
+Left / Right        Light azimuth (move it around the vertical axis)
+Up / Down           Light elevation (raise / lower it)
+M                   Light mode: viewer-fixed (default) <-> world-fixed
++ / -               Ambient level (0..1)
+O / Space           Light on / off
+R                   Reset the light to defaults
+Esc / L             Close the menu
+```
+
+By default the light is **viewer-fixed**: it stays put on screen while the object appears to
+rotate beneath it, so different faces catch the light as you orbit. Switch to **world-fixed**
+(`M`) to glue the light to the model instead (shading stays constant as the camera orbits).
 
 The viewer opens at a 3/4 angle so a model reads as 3D immediately. `.blend` files are
 supported by exporting to glTF through a headless Blender (requires the `blender` binary on
@@ -2204,6 +2220,7 @@ Controls:
 + -        zoom
 W          wireframe
 S          shading
+L          light menu (azimuth/elevation, mode, ambient, on/off)
 R          reset
 Q          quit
 ```
