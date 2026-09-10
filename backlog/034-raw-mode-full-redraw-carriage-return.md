@@ -48,4 +48,6 @@ Make the full-redraw path position rows explicitly instead of relying on `\n`:
 ## Completion
 - [ ] Implemented · [ ] Gate green + byte-level test · [ ] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ IMPLEMENTED — `emit_full_redraw` now positions each row with an absolute cursor
+move (`\x1b[{row+1};1H`) instead of relying on the serializer's `\n` joins; byte-level regression
+tests added. `to_text` / `--output` unchanged.
