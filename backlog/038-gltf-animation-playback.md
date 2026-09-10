@@ -55,6 +55,22 @@ crashing.
 Skeletal skinning, morph targets, animation blending, camera/light animation tracks.
 
 ## Completion
-- [ ] Implemented · [ ] Gate green + PTY check · [ ] PR opened · [ ] Merged
+- [x] Implemented · [x] Gate green + PTY check · [x] PR opened · [ ] Merged
 
-**Status:** ⬜ NOT STARTED
+**Status:** 🟦 IN REVIEW (branch `task/038-anim-b`)
+
+## Implementation notes
+- `rgfx-3d`: new `anim` module — `NodeTransform`, `AnimChannel`/`ChannelSamples`, `Interpolation`
+  (LINEAR/STEP), `SceneAnimation` (+`wrap_time`), `AnimatedScene` (hierarchy + un-baked
+  `MeshInstance`s + `evaluate`/`bake_static`), and a buffer-reusing `SceneAnimator::pose_into`.
+  The glTF loader now builds the hierarchy once and *bakes from it* for the static path (so
+  `load_gltf` is unchanged), and `load_gltf_animated` exposes the un-baked form. `GltfStats` gains
+  per-animation names/durations/skinned flags.
+- `rgfx-cli`: `A` opens a modal Animation menu via `viewer_chrome::overlay_panel` mirroring the
+  light menu — Space play/pause, `L` loop (default on), Up/Down select clip, `←/→` scrub, `+/-`
+  speed, `R` reset, `Esc`/`A` close. Playing makes the viewer time-driven (≈30 fps ticks advancing
+  by real elapsed time); status shows `anim:<name> t=..s ▶/❚❚ loop/once`. No animations → the menu
+  reports "no animations in this file". `rgfx info` lists animation names + durations.
+- **Skinning:** detected (`AnimationInfo::skinned`) and surfaced ("skinned: node motion only" /
+  `[skinned]` in info) but not applied — only rigid node motion plays; nothing crashes.
+- Fixture: `crates/rgfx-3d/tests/assets/animated_triangle.glb` (one 1.0s LINEAR translation clip).

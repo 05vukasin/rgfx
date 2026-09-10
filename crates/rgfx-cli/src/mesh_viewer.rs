@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use glam::Vec3;
 use rgfx_3d::{
-    OrbitController, Rasterizer, ShadingMode, direction_from_azimuth_elevation, simplify_scene,
+    OrbitController, Rasterizer, SceneAnimator, ShadingMode, direction_from_azimuth_elevation,
+    simplify_scene,
 };
 use rgfx_core::{
     BoundingSphere, Camera, Color, Framebuffer, Scene, SceneRenderer, TerminalEncoder,
@@ -207,13 +208,184 @@ impl LightState {
     }
 }
 
-/// A loaded scene together with the simplification that was (or was not) applied on load.
+/// Seconds scrubbed per `←`/`→` press while the animation menu is open.
+const ANIM_SCRUB_STEP: f32 = 0.1;
+/// Playback-speed delta per `+`/`-` press while the animation menu is open.
+const ANIM_SPEED_STEP: f32 = 0.25;
+/// Playback speed is clamped to this range so scrubbing never stalls or runs away.
+const ANIM_MIN_SPEED: f32 = 0.25;
+const ANIM_MAX_SPEED: f32 = 8.0;
+/// Target redraw interval while an animation is playing (~30 fps), so the viewer becomes
+/// time-driven rather than input-driven.
+const ANIM_FRAME: Duration = Duration::from_millis(33);
+
+/// The viewer-side animation-playback model: which animation is selected, the playback clock,
+/// whether it is playing/looping, the speed, and whether the modal animation menu is open. Pure
+/// state with no terminal dependency, so the menu's key routing and the play/pause/loop/scrub
+/// transitions are unit-testable headlessly.
+///
+/// An empty `names` list means the model carries no animations; the menu still opens (reporting
+/// "no animations in this file") but every playback key is inert.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AnimState {
+    /// Whether the modal animation menu is open (captures input while true).
+    menu_open: bool,
+    /// Whether playback is advancing with real time.
+    playing: bool,
+    /// Whether playback wraps at the end (the user's requested default when animations exist).
+    looping: bool,
+    /// Playback speed multiplier.
+    speed: f32,
+    /// The current playback time in seconds (within the selected animation).
+    time: f32,
+    /// The selected animation index (always `< names.len()` when any exist).
+    selected: usize,
+    /// The animation names, parallel to [`durations`](Self::durations)/[`skinned`](Self::skinned).
+    names: Vec<String>,
+    /// Per-animation duration in seconds.
+    durations: Vec<f32>,
+    /// Per-animation skinned flag (skinning is unsupported; only node motion plays).
+    skinned: Vec<bool>,
+}
+
+impl AnimState {
+    /// The state for a model with no animations: the menu may open but nothing plays.
+    fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Builds the state for a model with the given animations, starting paused-at-zero? No — the
+    /// user wants the model to move on load, so playback starts **playing** and **looping**.
+    fn new(names: Vec<String>, durations: Vec<f32>, skinned: Vec<bool>) -> Self {
+        let enabled = !names.is_empty();
+        Self {
+            menu_open: false,
+            playing: enabled,
+            looping: true,
+            speed: 1.0,
+            time: 0.0,
+            selected: 0,
+            names,
+            durations,
+            skinned,
+        }
+    }
+
+    /// Whether the model carries at least one animation.
+    fn enabled(&self) -> bool {
+        !self.names.is_empty()
+    }
+
+    /// The number of animations.
+    fn count(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Whether playback is currently advancing (playing and at least one animation exists).
+    fn is_playing(&self) -> bool {
+        self.playing && self.enabled()
+    }
+
+    /// The selected animation's duration, or `0.0` when none exist.
+    fn current_duration(&self) -> f32 {
+        self.durations.get(self.selected).copied().unwrap_or(0.0)
+    }
+
+    /// The selected animation's name, or `None` when none exist.
+    fn current_name(&self) -> Option<&str> {
+        self.names.get(self.selected).map(String::as_str)
+    }
+
+    /// Whether the selected animation is skinned (node motion only is played).
+    fn current_skinned(&self) -> bool {
+        self.skinned.get(self.selected).copied().unwrap_or(false)
+    }
+
+    /// Advances the clock by `dt` real seconds (scaled by speed) when playing, wrapping for a loop
+    /// or clamping (and pausing) at the end otherwise. Returns whether the time changed.
+    fn advance(&mut self, dt: f32) -> bool {
+        if !self.is_playing() || dt <= 0.0 {
+            return false;
+        }
+        let duration = self.current_duration();
+        if duration <= 0.0 {
+            return false;
+        }
+        self.time += dt * self.speed;
+        if self.looping {
+            self.time = self.time.rem_euclid(duration);
+        } else if self.time >= duration {
+            self.time = duration;
+            self.playing = false;
+        }
+        true
+    }
+
+    /// Moves the clock by `delta` seconds (scrub), wrapping or clamping to the duration.
+    fn scrub(&mut self, delta: f32) {
+        let duration = self.current_duration();
+        if duration <= 0.0 {
+            return;
+        }
+        let t = self.time + delta;
+        self.time = if self.looping {
+            t.rem_euclid(duration)
+        } else {
+            t.clamp(0.0, duration)
+        };
+    }
+
+    /// Selects an animation by signed offset (wrapping), resetting the clock to its start.
+    fn select(&mut self, offset: i32) {
+        let count = self.count();
+        if count == 0 {
+            return;
+        }
+        let n = count as i32;
+        self.selected = (((self.selected as i32 + offset) % n + n) % n) as usize;
+        self.time = 0.0;
+    }
+
+    /// Routes a key while the animation menu is open, mutating playback. Returns whether anything
+    /// changed. The open/close keys (`Esc`/`A`) are handled by [`ViewerState::on_key`] first.
+    fn on_menu_key(&mut self, key: KeyEvent) -> bool {
+        if !self.enabled() {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char(' ') => self.playing = !self.playing,
+            KeyCode::Char('l') | KeyCode::Char('L') => self.looping = !self.looping,
+            KeyCode::Up => self.select(-1),
+            KeyCode::Down => self.select(1),
+            KeyCode::Left => self.scrub(-ANIM_SCRUB_STEP),
+            KeyCode::Right => self.scrub(ANIM_SCRUB_STEP),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.speed = (self.speed + ANIM_SPEED_STEP).clamp(ANIM_MIN_SPEED, ANIM_MAX_SPEED);
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.speed = (self.speed - ANIM_SPEED_STEP).clamp(ANIM_MIN_SPEED, ANIM_MAX_SPEED);
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.time = 0.0;
+                self.speed = 1.0;
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// A loaded scene together with the simplification that was (or was not) applied on load and any
+/// animation playback driver.
 struct Loaded {
     /// The scene actually rendered — simplified when [`simplify_note`](Self::simplify_note) is set.
+    /// For an animated model this is the default (t=0) pose, used for framing and `--output`.
     scene: Scene,
     /// `Some((original_tris, simplified_tris))` when the mesh was decimated on load, so the status
     /// bar can surface the change; `None` when it was rendered at full detail.
     simplify_note: Option<(usize, usize)>,
+    /// The animation driver for a glTF model with ≥1 animation, or `None` for a static model.
+    animator: Option<SceneAnimator>,
 }
 
 /// Runs the 3D viewer for a request. Entry point called by the dispatch layer.
@@ -237,14 +409,32 @@ pub fn view(request: &ViewRequest<'_>, format: MeshFormat) -> anyhow::Result<()>
 /// original scene's triangle count is preserved in the returned [`Loaded::simplify_note`] — the
 /// `rgfx info` path loads independently, so it always reports the true on-disk counts.
 fn load_scene(path: &Path, format: MeshFormat, settings: &Settings) -> anyhow::Result<Loaded> {
+    // glTF may carry animations: load the un-baked hierarchy and, when animations exist, keep an
+    // animator to re-pose it each frame. Simplification is skipped for an animated model (it would
+    // change the per-instance vertex topology the animator rewrites in place).
+    if matches!(format, MeshFormat::Gltf) {
+        let animated = rgfx_3d::load_gltf_animated(path)
+            .with_context(|| format!("loading glTF {}", path.display()))?;
+        if animated.has_animations() {
+            let scene = animated.bake_static();
+            let animator = SceneAnimator::new(animated);
+            return Ok(Loaded {
+                scene,
+                simplify_note: None,
+                animator: Some(animator),
+            });
+        }
+        // No animations: fall through to the common static path using the baked pose.
+        return finish_static(animated.bake_static(), settings);
+    }
+
     let scene =
         match format {
             MeshFormat::Obj => rgfx_3d::load_obj(path)
                 .with_context(|| format!("loading OBJ {}", path.display()))?,
             MeshFormat::Stl => rgfx_3d::load_stl(path)
                 .with_context(|| format!("loading STL {}", path.display()))?,
-            MeshFormat::Gltf => rgfx_3d::load_gltf(path)
-                .with_context(|| format!("loading glTF {}", path.display()))?,
+            MeshFormat::Gltf => unreachable!("glTF handled above"),
             MeshFormat::Blend => rgfx_3d::load_blend(path).with_context(|| {
                 format!(
                     "loading Blender file {} (via headless export)",
@@ -252,7 +442,12 @@ fn load_scene(path: &Path, format: MeshFormat, settings: &Settings) -> anyhow::R
                 )
             })?,
         };
+    finish_static(scene, settings)
+}
 
+/// Applies the simplification budget to a static (non-animated) scene and wraps it in a
+/// [`Loaded`] with no animator.
+fn finish_static(scene: Scene, settings: &Settings) -> anyhow::Result<Loaded> {
     let total = scene.triangle_count();
     match simplify_target(total, settings) {
         Some(target) if target < total => {
@@ -266,11 +461,13 @@ fn load_scene(path: &Path, format: MeshFormat, settings: &Settings) -> anyhow::R
             Ok(Loaded {
                 scene: simplified,
                 simplify_note: Some((total, new_tris)),
+                animator: None,
             })
         }
         _ => Ok(Loaded {
             scene,
             simplify_note: None,
+            animator: None,
         }),
     }
 }
@@ -369,6 +566,8 @@ pub(crate) struct ViewerState {
     color: bool,
     /// The directional-light model (mode, azimuth/elevation, ambient, on/off) and its modal menu.
     light: LightState,
+    /// The animation-playback model (selection, clock, play/loop/speed) and its modal menu.
+    anim: AnimState,
     /// Whether the status bar / key help overlay is shown.
     show_ui: bool,
     /// The last pointer cell while a left-drag is in progress, for drag-to-orbit deltas.
@@ -382,7 +581,12 @@ pub(crate) struct ViewerState {
 impl ViewerState {
     /// Builds the initial state for `sphere`, framing it in `viewport` with the settings' field of
     /// view, shading, wireframe, and color defaults.
-    pub(crate) fn new(sphere: BoundingSphere, settings: &Settings, viewport: Viewport) -> Self {
+    pub(crate) fn new(
+        sphere: BoundingSphere,
+        settings: &Settings,
+        viewport: Viewport,
+        anim: AnimState,
+    ) -> Self {
         let aspect = viewport.aspect(SUBPIXEL_X, SUBPIXEL_Y).max(f32::EPSILON);
         let mut camera = Camera::perspective(aspect, settings.fov_degrees.to_radians());
         let mut controls = OrbitController::from_camera(&camera);
@@ -401,6 +605,7 @@ impl ViewerState {
             wireframe: settings.wireframe,
             color: settings.color,
             light: LightState::new(),
+            anim,
             show_ui: true,
             last_drag: None,
             scratch: Framebuffer::new(0, 0),
@@ -421,6 +626,27 @@ impl ViewerState {
         } else {
             base
         }
+    }
+
+    /// Whether an animation is currently playing (so the loop should redraw on a timer tick).
+    pub(crate) fn anim_playing(&self) -> bool {
+        self.anim.is_playing()
+    }
+
+    /// The selected animation index, for posing the animator.
+    pub(crate) fn anim_selected(&self) -> usize {
+        self.anim.selected
+    }
+
+    /// The current playback time in seconds, for posing the animator.
+    pub(crate) fn anim_time(&self) -> f32 {
+        self.anim.time
+    }
+
+    /// Advances the animation clock by `dt` real seconds, returning whether the time changed (and
+    /// a redraw is therefore needed).
+    pub(crate) fn advance_anim(&mut self, dt: f32) -> bool {
+        self.anim.advance(dt)
     }
 
     /// Applies a key press, updating the camera or toggles and reporting what the loop should do.
@@ -452,10 +678,29 @@ impl ViewerState {
             };
         }
 
+        // The animation menu likewise captures input while open: Esc/A close it, everything else
+        // drives playback (never the camera).
+        if self.anim.menu_open {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.anim.menu_open = false;
+                    KeyAction::Redraw
+                }
+                _ => {
+                    if self.anim.on_menu_key(key) {
+                        KeyAction::Redraw
+                    } else {
+                        KeyAction::Ignore
+                    }
+                }
+            };
+        }
+
         if is_quit(key) {
             return KeyAction::Quit;
         }
         match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => self.anim.menu_open = true,
             KeyCode::Left => self.controls.orbit(-ORBIT_STEP, 0.0),
             KeyCode::Right => self.controls.orbit(ORBIT_STEP, 0.0),
             KeyCode::Up => self.controls.orbit(0.0, ORBIT_STEP),
@@ -612,10 +857,13 @@ impl ViewerState {
                 self.overlay_status(&mut frame, info);
             }
         }
-        // The modal light menu draws over everything (even with the status bar hidden) since the
-        // user explicitly opened it.
+        // The modal menus draw over everything (even with the status bar hidden) since the user
+        // explicitly opened them.
         if self.light.menu_open {
             self.overlay_light_menu(&mut frame);
+        }
+        if self.anim.menu_open {
+            self.overlay_anim_menu(&mut frame);
         }
         Ok(frame)
     }
@@ -632,8 +880,19 @@ impl ViewerState {
             Some((orig, new)) => format!("{orig}\u{2192}{new} tris (simplified)"),
             None => format!("{} tris", info.triangles),
         };
+        let anim = if self.anim.enabled() {
+            let name = self.anim.current_name().unwrap_or("");
+            let loop_state = if self.anim.looping { "loop" } else { "once" };
+            let play = if self.anim.playing { "▶" } else { "❚❚" };
+            format!(
+                " | anim:{name} t={:.1}s {play} {loop_state}",
+                self.anim.time
+            )
+        } else {
+            String::new()
+        };
         let status = format!(
-            "{} | {} | {:.1} fps | {} | {}{} | {}",
+            "{} | {} | {:.1} fps | {} | {}{} | {}{}",
             info.file,
             tris,
             info.fps,
@@ -641,8 +900,9 @@ impl ViewerState {
             shading_name(self.effective_shading()),
             if self.color { " | color" } else { "" },
             light,
+            anim,
         );
-        let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light-menu  F:ui  Q:quit";
+        let help = "arrows:orbit  z/x:roll  +/-:zoom  R:reset  W:wire  S:shade  C:color  L:light  A:anim  F:ui  Q:quit";
         crate::viewer_chrome::overlay_bottom_bar(frame, &status, help);
     }
 
@@ -665,6 +925,40 @@ impl ViewerState {
             "+/- ambient   O/Space on/off".to_string(),
             "R reset   Esc/L close".to_string(),
         ];
+        crate::viewer_chrome::overlay_panel(frame, 1, 1, &lines);
+    }
+
+    /// Draws the modal animation-menu panel (selection, clock, play/loop/speed, and key help)
+    /// floating near the top-left of `frame`. With no animations it reports that plainly.
+    fn overlay_anim_menu(&self, frame: &mut TerminalFrame) {
+        let a = &self.anim;
+        let lines = if !a.enabled() {
+            vec![
+                "Animation menu".to_string(),
+                "no animations in this file".to_string(),
+                String::new(),
+                "Esc/A close".to_string(),
+            ]
+        } else {
+            let name = a.current_name().unwrap_or("");
+            let skin = if a.current_skinned() {
+                "  (skinned: node motion only)"
+            } else {
+                ""
+            };
+            vec![
+                "Animation menu".to_string(),
+                format!("clip:    {} [{}/{}]", name, a.selected + 1, a.count()),
+                format!("time:    {:.2}s / {:.2}s", a.time, a.current_duration()),
+                format!("state:   {}", if a.playing { "playing" } else { "paused" }),
+                format!("loop:    {}", if a.looping { "on" } else { "off" }),
+                format!("speed:   {:.2}x{skin}", a.speed),
+                String::new(),
+                "Space play/pause   L loop".to_string(),
+                "\u{2191}/\u{2193} clip   \u{2190}/\u{2192} scrub".to_string(),
+                "+/- speed   R reset   Esc/A close".to_string(),
+            ]
+        };
         crate::viewer_chrome::overlay_panel(frame, 1, 1, &lines);
     }
 }
@@ -737,7 +1031,8 @@ fn write_output(
     let scene = &loaded.scene;
     let sphere = scene_sphere(scene)?;
     let viewport = output_viewport(settings);
-    let mut state = ViewerState::new(sphere, settings, viewport);
+    // `--output` renders the default (t=0) pose; no interactive menu is needed.
+    let mut state = ViewerState::new(sphere, settings, viewport, AnimState::disabled());
     let mut fb = Framebuffer::new(0, 0);
     let color = if settings.color {
         ColorMode::TrueColor
@@ -767,10 +1062,27 @@ const INTERACT_DOWNSCALE: u32 = 2;
 /// view is treated as idle and re-rendered at full resolution.
 const INTERACT_IDLE: Duration = Duration::from_millis(120);
 
-/// Runs the interactive viewer: auto-frame, then an event-driven orbit/render loop that redraws
-/// only on input or resize. While the user is actively orbiting/zooming the scene renders at a
-/// reduced resolution for responsiveness, snapping back to full resolution once input goes idle.
-/// The [`Session`] restores the terminal on every exit path.
+/// Builds the initial [`AnimState`] for a loaded model: the animator's animation names, durations,
+/// and skinned flags, or a disabled state when the model has no animations.
+fn anim_state_for(loaded: &Loaded) -> AnimState {
+    match &loaded.animator {
+        Some(animator) => {
+            let (mut names, mut durations, mut skinned) = (Vec::new(), Vec::new(), Vec::new());
+            for a in animator.animations() {
+                names.push(a.name.clone());
+                durations.push(a.duration);
+                skinned.push(a.skinned);
+            }
+            AnimState::new(names, durations, skinned)
+        }
+        None => AnimState::disabled(),
+    }
+}
+
+/// Runs the interactive viewer: auto-frame, then an orbit/render loop. A static model redraws only
+/// on input or resize (and uses reduced-resolution rendering while interacting); a model with an
+/// animation becomes **time-driven** while playing, re-posing the scene and redrawing each tick so
+/// the motion loops. The [`Session`] restores the terminal on every exit path.
 fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow::Result<()> {
     let scene = &loaded.scene;
     let sphere = scene_sphere(scene)?;
@@ -782,14 +1094,18 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
     let mut engine = FrameEngine::new(detect_color_mode());
     // One framebuffer, reused across every re-render (no per-frame allocation).
     let mut fb = Framebuffer::new(0, 0);
+    // The animator (cloned once) re-poses this reused scene buffer each frame while playing.
+    let mut animator = loaded.animator.clone();
+    let mut anim_scene = Scene::default();
 
     let mut viewport = session.viewport()?;
-    let mut state = ViewerState::new(sphere, settings, viewport);
+    let mut state = ViewerState::new(sphere, settings, viewport, anim_state_for(loaded));
     let mut dirty = true;
     // While `interacting`, render at reduced resolution and poll with a short idle timeout so the
     // loop wakes to upgrade the frame to full resolution shortly after input stops.
     let mut interacting = false;
     let mut fps = 0.0f32;
+    let mut last = Instant::now();
 
     loop {
         if dirty {
@@ -801,8 +1117,19 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
                 simplify,
             };
             let downscale = if interacting { INTERACT_DOWNSCALE } else { 1 };
+            // Re-pose the animated scene for the current clip/time; static models render directly.
+            let render_scene: &Scene = if let Some(a) = animator.as_mut() {
+                a.pose_into(
+                    Some(state.anim_selected()),
+                    state.anim_time(),
+                    &mut anim_scene,
+                );
+                &anim_scene
+            } else {
+                scene
+            };
             let frame = state.render_scaled(
-                scene,
+                render_scene,
                 viewport,
                 &mut fb,
                 engine.mode(),
@@ -817,13 +1144,19 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
             dirty = false;
         }
 
-        // Poll quickly while interacting so we can restore full resolution promptly once idle.
-        let timeout = if interacting {
+        // Tick quickly while playing (time-driven) or just-interacted (to restore full resolution).
+        let timeout = if state.anim_playing() {
+            ANIM_FRAME
+        } else if interacting {
             INTERACT_IDLE
         } else {
             POLL_TIMEOUT
         };
-        match session.poll_event(timeout)? {
+        let event = session.poll_event(timeout)?;
+        if event.is_some() {
+            last = Instant::now();
+        }
+        match event {
             Some(Event::Resize(cols, rows)) => {
                 viewport = Viewport::new(cols, rows);
                 state.set_aspect(viewport);
@@ -846,12 +1179,21 @@ fn run_interactive(loaded: &Loaded, path: &Path, settings: &Settings) -> anyhow:
                 }
                 KeyAction::Ignore => {}
             },
-            // Idle tick after interaction: upgrade to a full-resolution frame.
-            None if interacting => {
-                interacting = false;
-                dirty = true;
+            // Timeout tick: advance playback by real elapsed time and/or drop back to full res.
+            None => {
+                let now = Instant::now();
+                let dt = (now - last).as_secs_f32();
+                last = now;
+                if state.advance_anim(dt) {
+                    dirty = true;
+                }
+                if interacting {
+                    interacting = false;
+                    dirty = true;
+                }
             }
-            _ => {}
+            // Focus/paste events don't affect the view.
+            Some(_) => {}
         }
     }
     Ok(())
@@ -877,7 +1219,24 @@ mod tests {
     fn state(viewport: Viewport) -> ViewerState {
         let scene = cube_scene();
         let sphere = scene_sphere(&scene).unwrap();
-        ViewerState::new(sphere, &settings(RenderOpts::default()), viewport)
+        ViewerState::new(
+            sphere,
+            &settings(RenderOpts::default()),
+            viewport,
+            AnimState::disabled(),
+        )
+    }
+
+    /// A viewer state wired with a couple of fake animations, for the animation-menu tests.
+    fn state_with_anim(viewport: Viewport) -> ViewerState {
+        let scene = cube_scene();
+        let sphere = scene_sphere(&scene).unwrap();
+        let anim = AnimState::new(
+            vec!["walk".to_string(), "jump".to_string()],
+            vec![2.0, 1.0],
+            vec![false, false],
+        );
+        ViewerState::new(sphere, &settings(RenderOpts::default()), viewport, anim)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1369,6 +1728,157 @@ mod tests {
             frame.to_text().contains("Light menu"),
             "the modal menu panel must be drawn while open"
         );
+    }
+
+    // --- Animation menu + playback clock ----------------------------------------------------------
+
+    #[test]
+    fn anim_menu_opens_and_routes_keys_while_freezing_the_camera() {
+        let mut s = state_with_anim(Viewport::new(40, 20));
+
+        // Closed: arrows orbit the camera; playback keys are not intercepted.
+        let orient0 = s.controls.orientation();
+        assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
+        assert_ne!(
+            s.controls.orientation(),
+            orient0,
+            "closed menu orbits camera"
+        );
+
+        // `A` opens the modal animation menu.
+        assert_eq!(s.on_key(key(KeyCode::Char('a'))), KeyAction::Redraw);
+        assert!(s.anim.menu_open);
+
+        // Open: arrows scrub/select; the camera orbit is frozen.
+        let orient_frozen = s.controls.orientation();
+        assert_eq!(s.on_key(key(KeyCode::Right)), KeyAction::Redraw);
+        assert_eq!(
+            s.controls.orientation(),
+            orient_frozen,
+            "camera must not orbit while the menu is open"
+        );
+
+        // `Esc` closes; arrows orbit the camera again.
+        assert_eq!(s.on_key(key(KeyCode::Esc)), KeyAction::Redraw);
+        assert!(!s.anim.menu_open);
+        let resumed = s.controls.orientation();
+        s.on_key(key(KeyCode::Left));
+        assert_ne!(
+            s.controls.orientation(),
+            resumed,
+            "camera orbits after close"
+        );
+    }
+
+    #[test]
+    fn anim_play_pause_loop_scrub_and_select_under_a_mock_clock() {
+        let mut s = state_with_anim(Viewport::new(40, 20));
+        s.on_key(key(KeyCode::Char('a'))); // open
+
+        // Defaults: playing + looping, clip 0 ("walk", 2.0s).
+        assert!(s.anim.playing && s.anim.looping);
+        assert_eq!(s.anim_selected(), 0);
+
+        // A mock clock tick advances time while playing.
+        assert!(s.advance_anim(0.5), "playing advances");
+        assert!((s.anim_time() - 0.5).abs() < 1e-6);
+
+        // Space pauses: ticks no longer advance.
+        s.on_key(key(KeyCode::Char(' ')));
+        assert!(!s.anim.playing);
+        assert!(!s.advance_anim(0.5), "paused does not advance");
+        assert!((s.anim_time() - 0.5).abs() < 1e-6);
+
+        // Resume and wrap past the 2.0s duration (loop on).
+        s.on_key(key(KeyCode::Char(' ')));
+        assert!(s.advance_anim(2.0)); // 0.5 + 2.0 = 2.5 -> wraps to 0.5
+        assert!((s.anim_time() - 0.5).abs() < 1e-5, "loop wraps the clock");
+
+        // Turning loop off and running past the end clamps and pauses.
+        s.on_key(key(KeyCode::Char('l')));
+        assert!(!s.anim.looping);
+        s.advance_anim(10.0);
+        assert!((s.anim_time() - 2.0).abs() < 1e-5, "clamps at duration");
+        assert!(!s.anim.playing, "non-looping playback pauses at the end");
+
+        // Scrub moves the clock without playing.
+        s.on_key(key(KeyCode::Left));
+        assert!(s.anim_time() < 2.0, "left scrubs backwards");
+
+        // Up/Down selects another clip and resets the clock.
+        s.on_key(key(KeyCode::Down));
+        assert_eq!(s.anim_selected(), 1, "Down selects the next clip");
+        assert_eq!(s.anim_time(), 0.0, "selecting resets the clock");
+        assert_eq!(s.anim.current_name(), Some("jump"));
+    }
+
+    #[test]
+    fn anim_speed_clamps_and_reset_restores_defaults() {
+        let mut s = state_with_anim(Viewport::new(40, 20));
+        s.on_key(key(KeyCode::Char('a')));
+        for _ in 0..50 {
+            s.on_key(key(KeyCode::Char('+')));
+        }
+        assert!(
+            (s.anim.speed - ANIM_MAX_SPEED).abs() < 1e-6,
+            "speed clamps high"
+        );
+        for _ in 0..100 {
+            s.on_key(key(KeyCode::Char('-')));
+        }
+        assert!(
+            (s.anim.speed - ANIM_MIN_SPEED).abs() < 1e-6,
+            "speed clamps low"
+        );
+
+        s.on_key(key(KeyCode::Right)); // move the clock
+        s.on_key(key(KeyCode::Char('r')));
+        assert_eq!(s.anim_time(), 0.0);
+        assert!((s.anim.speed - 1.0).abs() < 1e-6, "reset restores 1x speed");
+    }
+
+    #[test]
+    fn no_animations_menu_reports_none_and_does_not_crash() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(60, 24);
+        let mut fb = Framebuffer::new(0, 0);
+        let mut s = state(viewport); // disabled animations
+        assert_eq!(s.on_key(key(KeyCode::Char('a'))), KeyAction::Redraw);
+        assert!(s.anim.menu_open);
+
+        let frame = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, None)
+            .unwrap();
+        assert!(
+            frame.to_text().contains("no animations in this file"),
+            "the menu must report the absence of animations"
+        );
+        // Playback keys are inert, no panic.
+        assert!(!s.advance_anim(1.0));
+        assert_eq!(s.on_key(key(KeyCode::Char(' '))), KeyAction::Ignore);
+    }
+
+    #[test]
+    fn open_anim_menu_draws_panel_and_status_shows_clip_and_loop() {
+        let scene = cube_scene();
+        let viewport = Viewport::new(120, 24);
+        let mut fb = Framebuffer::new(0, 0);
+        let mut s = state_with_anim(viewport);
+        s.on_key(key(KeyCode::Char('a')));
+
+        let info = StatusInfo {
+            file: "walker.glb",
+            triangles: 12,
+            fps: 30.0,
+            simplify: None,
+        };
+        let text = s
+            .render(&scene, viewport, &mut fb, ColorMode::None, Some(&info))
+            .unwrap()
+            .to_text();
+        assert!(text.contains("Animation menu"), "menu panel drawn");
+        assert!(text.contains("anim:walk"), "status shows the clip name");
+        assert!(text.contains("loop"), "status shows the loop state");
     }
 
     // --- Simplification budget decision + adaptive resolution -------------------------------------

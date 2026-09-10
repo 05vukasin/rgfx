@@ -58,6 +58,9 @@ pub struct Report {
     /// Declared animation count, for meshes that track animations (glTF).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub animations: Option<usize>,
+    /// Per-animation `name (duration)` summaries, for meshes that declare animations (glTF).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animation_names: Vec<String>,
     /// Bounding-box size along each axis `[x, y, z]`, for meshes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounding_box: Option<[f32; 3]>,
@@ -91,6 +94,7 @@ impl Report {
             triangles: None,
             materials: None,
             animations: None,
+            animation_names: Vec::new(),
             bounding_box: None,
             codec: None,
             fps: None,
@@ -129,6 +133,9 @@ impl Report {
         }
         if let Some(v) = self.animations {
             rows.push(("animations", v.to_string()));
+        }
+        for name in &self.animation_names {
+            rows.push(("animation", name.clone()));
         }
         if let Some([x, y, z]) = self.bounding_box {
             rows.push(("bounding box", format!("{x:.3} x {y:.3} x {z:.3}")));
@@ -313,6 +320,7 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.triangles = Some(stats.triangle_count);
             report.materials = Some(stats.material_count);
             report.animations = Some(stats.animation_count);
+            report.animation_names = animation_summaries(&stats.animations);
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
         MeshFormat::Blend => {
@@ -328,10 +336,23 @@ fn mesh_report(input: &Input, path: &Path, format: MeshFormat) -> Result<Report>
             report.triangles = Some(stats.triangle_count);
             report.materials = Some(stats.material_count);
             report.animations = Some(stats.animation_count);
+            report.animation_names = animation_summaries(&stats.animations);
             report.bounding_box = stats.bounding_box.map(bbox_size);
         }
     }
     Ok(report)
+}
+
+/// Formats each animation as `name (1.50s)`, tagging skinned animations so the (unsupported)
+/// skinning is visible in `rgfx info`.
+fn animation_summaries(animations: &[rgfx_3d::AnimationInfo]) -> Vec<String> {
+    animations
+        .iter()
+        .map(|a| {
+            let skin = if a.skinned { " [skinned]" } else { "" };
+            format!("{} ({:.2}s){}", a.name, a.duration, skin)
+        })
+        .collect()
 }
 
 /// The `[x, y, z]` extent of a bounding box.
@@ -504,5 +525,20 @@ f 4 8 5 1
         let err = build_report(&input).unwrap_err();
         std::fs::remove_file(&path).ok();
         assert!(err.to_string().contains("decoding image"), "got: {err}");
+    }
+
+    #[test]
+    fn animated_gltf_info_lists_animation_names_and_durations() {
+        // The shared fixture in the rgfx-3d crate carries one "slide" animation of 1.0s.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../rgfx-3d/tests/assets/animated_triangle.glb");
+        let input = Input::File(path.clone());
+        let report = build_report(&input).expect("animated glb should describe");
+        assert_eq!(report.kind, "mesh");
+        assert_eq!(report.animations, Some(1));
+        assert_eq!(report.animation_names, vec!["slide (1.00s)".to_string()]);
+        // The human rendering surfaces the named animation row.
+        let text = report.to_human();
+        assert!(text.contains("slide (1.00s)"), "got:\n{text}");
     }
 }

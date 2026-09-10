@@ -2,16 +2,22 @@
 //!
 //! [`load_gltf`] reads a glTF 2.0 asset — either a JSON `.gltf` file (with its external or
 //! data-URI buffers) or a binary `.glb` container — into an [`rgfx_core::Scene`] whose meshes
-//! carry world-space vertex positions. This task covers **static meshes with the node transform
-//! hierarchy baked in**: each node's local transform is composed with its parents' transforms and
-//! applied to the vertices it references, so a multi-node scene assembles in the right place
-//! without the renderer needing per-mesh model matrices.
+//! carry world-space vertex positions. Each node's local transform is composed with its parents'
+//! transforms and applied to the vertices it references, so a multi-node scene assembles in the
+//! right place without the renderer needing per-mesh model matrices.
+//!
+//! For **animation**, [`load_gltf_animated`] returns an [`AnimatedScene`] instead: the node
+//! hierarchy plus each mesh's *un-baked* local-space vertices and the asset's TRS animations, so
+//! the scene can be re-posed every frame. The static [`load_gltf`] path is the default pose of the
+//! very same data ([`AnimatedScene::bake_static`]).
 //!
 //! Materials are read only far enough to pull each primitive's base color *factor* (no texture
 //! sampling — that is a later task); the factors and the asset's material/animation counts are
 //! reported through [`GltfStats`] via [`load_gltf_with_stats`] so the CLI `info` view can surface
 //! them. Only triangle-mode primitives are turned into geometry; other primitive modes (points,
-//! lines, strips/fans) are outside this task's scope and are skipped.
+//! lines, strips/fans) are outside this task's scope and are skipped. **Skeletal skinning is not
+//! applied** — a skinned animation is detected (see [`AnimationInfo::skinned`]) and plays only its
+//! rigid node motion.
 //!
 //! Malformed input — a bad container, a missing buffer, a primitive without positions, or an
 //! out-of-range index — produces an [`rgfx_core::Error`] rather than a panic.
@@ -24,17 +30,22 @@
 //! # Ok::<(), rgfx_core::Error>(())
 //! ```
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use glam::{Mat3, Mat4, Vec3};
+use glam::Vec3;
 use rgfx_core::{BoundingBox, BoundingSphere, Error, Mesh, Result, Scene, Vertex};
+
+use crate::anim::{
+    AnimChannel, AnimatedScene, AnimationInfo, ChannelSamples, Interpolation, MeshInstance,
+    NodeTransform, SceneAnimation, SceneNode,
+};
 
 /// Summary statistics for a loaded glTF asset.
 ///
 /// These are gathered during [`load_gltf_with_stats`] for reporting (e.g. the CLI `info` view).
-/// Counts such as [`material_count`](Self::material_count) and
-/// [`animation_count`](Self::animation_count) reflect what the asset *declares*, even though
-/// materials are not yet shaded and animations are not yet played back.
+/// Counts such as [`material_count`](Self::material_count) reflect what the asset *declares*, even
+/// though materials are not yet shaded.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GltfStats {
     /// Number of meshes produced (one per triangle-mode primitive that carried geometry).
@@ -47,6 +58,8 @@ pub struct GltfStats {
     pub material_count: usize,
     /// Number of animations declared by the asset.
     pub animation_count: usize,
+    /// The name, duration, and skinning flag of each declared animation.
+    pub animations: Vec<AnimationInfo>,
     /// The base color RGBA factor of each produced mesh, parallel to [`Scene::meshes`].
     ///
     /// Base color textures are not sampled yet; this is the material's constant factor (or the
@@ -77,43 +90,18 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<Scene> {
 ///
 /// Same as [`load_gltf`].
 pub fn load_gltf_with_stats(path: impl AsRef<Path>) -> Result<(Scene, GltfStats)> {
-    let path = path.as_ref();
-    let (document, buffers, _images) =
-        gltf::import(path).map_err(|e| Error::Decode(format!("glTF import failed: {e}")))?;
+    let (animated, material_count) = import_animated(path.as_ref())?;
+    let scene = animated.bake_static();
 
-    let mut meshes = Vec::new();
-    let mut base_colors = Vec::new();
-
-    // Traverse the default scene (falling back to the first) so node transforms compose from the
-    // roots down. An asset with no scenes yields an empty result, which is valid, not an error.
-    let scene = document
-        .default_scene()
-        .or_else(|| document.scenes().next());
-    if let Some(scene) = scene {
-        for node in scene.nodes() {
-            process_node(
-                &node,
-                Mat4::IDENTITY,
-                &buffers,
-                &mut meshes,
-                &mut base_colors,
-            )?;
-        }
-    }
-
-    let name = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let scene = Scene::new(name, meshes);
-
+    let base_colors: Vec<[f32; 4]> = animated.instances.iter().map(|i| i.base_color).collect();
     let bounding_box = scene.bounding_box();
     let stats = GltfStats {
         mesh_count: scene.meshes.len(),
         vertex_count: scene.vertex_count(),
         triangle_count: scene.triangle_count(),
-        material_count: document.materials().count(),
-        animation_count: document.animations().count(),
+        material_count,
+        animation_count: animated.animations.len(),
+        animations: animated.animation_infos(),
         base_colors,
         bounding_box,
         bounding_sphere: bounding_box.map(|b| b.bounding_sphere()),
@@ -122,46 +110,119 @@ pub fn load_gltf_with_stats(path: impl AsRef<Path>) -> Result<(Scene, GltfStats)
     Ok((scene, stats))
 }
 
-/// Recursively walks a node, composing `parent` with the node's local transform and baking the
-/// resulting world transform into any triangle geometry the node references.
-fn process_node(
-    node: &gltf::Node,
-    parent: Mat4,
-    buffers: &[gltf::buffer::Data],
-    meshes: &mut Vec<Mesh>,
-    base_colors: &mut Vec<[f32; 4]>,
-) -> Result<()> {
-    let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+/// Loads a glTF 2.0 / GLB asset into an [`AnimatedScene`]: the node hierarchy, each mesh's
+/// *local-space* (un-baked) vertices, and the asset's TRS animations — the form required for
+/// time-based playback.
+///
+/// For a model with no animations this still returns the full hierarchy (with an empty
+/// [`AnimatedScene::animations`]); [`AnimatedScene::bake_static`] reproduces [`load_gltf`]'s
+/// output.
+///
+/// # Errors
+///
+/// Same as [`load_gltf`].
+pub fn load_gltf_animated(path: impl AsRef<Path>) -> Result<AnimatedScene> {
+    import_animated(path.as_ref()).map(|(scene, _)| scene)
+}
 
-    if let Some(mesh) = node.mesh() {
-        // Normals transform by the inverse-transpose of the linear part to survive non-uniform
-        // scale/shear; positions transform by the full affine matrix.
-        let normal_matrix = Mat3::from_mat4(world).inverse().transpose();
-        for primitive in mesh.primitives() {
-            if primitive.mode() != gltf::mesh::Mode::Triangles {
-                continue;
-            }
-            if let Some((mesh, base_color)) =
-                load_primitive(&primitive, world, normal_matrix, buffers)?
-            {
-                meshes.push(mesh);
-                base_colors.push(base_color);
-            }
+/// Imports a glTF asset into an [`AnimatedScene`], also returning the declared material count.
+fn import_animated(path: &Path) -> Result<(AnimatedScene, usize)> {
+    let (document, buffers, _images) =
+        gltf::import(path).map_err(|e| Error::Decode(format!("glTF import failed: {e}")))?;
+
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut builder = SceneBuilder::default();
+    // Traverse the default scene (falling back to the first) so the hierarchy roots are consistent
+    // with the baked loader. An asset with no scenes yields an empty result, which is valid.
+    let scene = document
+        .default_scene()
+        .or_else(|| document.scenes().next());
+    if let Some(scene) = scene {
+        for node in scene.nodes() {
+            builder.visit(&node, None, &buffers)?;
         }
     }
 
-    for child in node.children() {
-        process_node(&child, world, buffers, meshes, base_colors)?;
-    }
-    Ok(())
+    let animations = build_animations(&document, &buffers, &builder.gltf_to_local);
+
+    let animated = AnimatedScene {
+        name,
+        nodes: builder.nodes,
+        roots: builder.roots,
+        instances: builder.instances,
+        animations,
+    };
+    Ok((animated, document.materials().count()))
 }
 
-/// Bakes a single triangle-mode primitive into a [`Mesh`], returning it together with its material
-/// base color factor. Returns `Ok(None)` when the primitive carries no vertices.
+/// Accumulates the node hierarchy and local mesh instances during a depth-first scene walk.
+///
+/// Nodes are pushed in pre-order, so a node's dense index is always greater than its parent's —
+/// which lets [`crate::anim::SceneAnimator`] compose world matrices in a single ascending pass.
+#[derive(Default)]
+struct SceneBuilder {
+    nodes: Vec<SceneNode>,
+    roots: Vec<usize>,
+    instances: Vec<MeshInstance>,
+    /// Maps a glTF node index to its dense index in [`nodes`](Self::nodes), for channel targeting.
+    gltf_to_local: HashMap<usize, usize>,
+}
+
+impl SceneBuilder {
+    /// Visits `node`, recording its local transform, its mesh instances (in local space), and
+    /// recursing into its children.
+    fn visit(
+        &mut self,
+        node: &gltf::Node,
+        parent: Option<usize>,
+        buffers: &[gltf::buffer::Data],
+    ) -> Result<()> {
+        let dense = self.nodes.len();
+        self.gltf_to_local.insert(node.index(), dense);
+
+        let (t, r, s) = node.transform().decomposed();
+        self.nodes.push(SceneNode {
+            name: node.name().map(str::to_owned),
+            local: NodeTransform::from_trs(t, r, s),
+            parent,
+            children: Vec::new(),
+        });
+        if let Some(p) = parent {
+            self.nodes[p].children.push(dense);
+        } else {
+            self.roots.push(dense);
+        }
+
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                    continue;
+                }
+                if let Some((mesh, base_color)) = load_primitive(&primitive, buffers)? {
+                    self.instances.push(MeshInstance {
+                        node: dense,
+                        mesh,
+                        base_color,
+                    });
+                }
+            }
+        }
+
+        for child in node.children() {
+            self.visit(&child, Some(dense), buffers)?;
+        }
+        Ok(())
+    }
+}
+
+/// Reads a single triangle-mode primitive into a *local-space* [`Mesh`] (no transform baked in),
+/// returning it with its material base color factor. Returns `Ok(None)` for an empty primitive.
 fn load_primitive(
     primitive: &gltf::Primitive,
-    world: Mat4,
-    normal_matrix: Mat3,
     buffers: &[gltf::buffer::Data],
 ) -> Result<Option<(Mesh, [f32; 4])>> {
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|d| &d.0[..]));
@@ -182,10 +243,10 @@ fn load_primitive(
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let position = world.transform_point3(Vec3::from_array(*p));
+            let position = Vec3::from_array(*p);
             let normal = normals
                 .get(i)
-                .map(|n| (normal_matrix * Vec3::from_array(*n)).normalize_or_zero())
+                .map(|n| Vec3::from_array(*n))
                 .unwrap_or(Vec3::ZERO);
             Vertex::new(position, normal)
         })
@@ -214,6 +275,107 @@ fn load_primitive(
         .base_color_factor();
 
     Ok(Some((Mesh::new(vertices, indices), base_color)))
+}
+
+/// Parses every animation in the document into a [`SceneAnimation`], mapping glTF node targets to
+/// dense node indices. Channels targeting unreachable nodes, unsupported paths (morph weights), or
+/// `CUBICSPLINE` tangents are handled conservatively (skipped or linearised on the value points).
+fn build_animations(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    gltf_to_local: &HashMap<usize, usize>,
+) -> Vec<SceneAnimation> {
+    let skinned_nodes = skinned_node_set(document, gltf_to_local);
+
+    document
+        .animations()
+        .enumerate()
+        .map(|(i, animation)| {
+            let name = animation
+                .name()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("animation {i}"));
+
+            let mut channels = Vec::new();
+            let mut duration = 0.0f32;
+            let mut skinned = false;
+
+            for channel in animation.channels() {
+                let target = channel.target();
+                let Some(&node) = gltf_to_local.get(&target.node().index()) else {
+                    continue;
+                };
+                if skinned_nodes.contains(&node) {
+                    skinned = true;
+                }
+
+                let interpolation = match channel.sampler().interpolation() {
+                    gltf::animation::Interpolation::Step => Interpolation::Step,
+                    // LINEAR, and CUBICSPLINE linearised on its value points (tangents dropped).
+                    _ => Interpolation::Linear,
+                };
+
+                let reader = channel.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+                let Some(times) = reader.read_inputs().map(|it| it.collect::<Vec<f32>>()) else {
+                    continue;
+                };
+                if times.is_empty() {
+                    continue;
+                }
+                let Some(outputs) = reader.read_outputs() else {
+                    continue;
+                };
+
+                let samples = match outputs {
+                    gltf::animation::util::ReadOutputs::Translations(it) => {
+                        ChannelSamples::Translation(it.map(Vec3::from_array).collect())
+                    }
+                    gltf::animation::util::ReadOutputs::Scales(it) => {
+                        ChannelSamples::Scale(it.map(Vec3::from_array).collect())
+                    }
+                    gltf::animation::util::ReadOutputs::Rotations(r) => {
+                        ChannelSamples::Rotation(r.into_f32().map(glam::Quat::from_array).collect())
+                    }
+                    // Morph-target weights are out of scope.
+                    gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => continue,
+                };
+
+                if let Some(&last) = times.last() {
+                    duration = duration.max(last);
+                }
+                channels.push(AnimChannel {
+                    node,
+                    interpolation,
+                    times,
+                    samples,
+                });
+            }
+
+            SceneAnimation {
+                name,
+                duration,
+                skinned,
+                channels,
+            }
+        })
+        .collect()
+}
+
+/// The set of dense node indices that are skin joints, so animations touching them can be flagged
+/// as (unsupported) skinned even though their rigid node motion still plays.
+fn skinned_node_set(
+    document: &gltf::Document,
+    gltf_to_local: &HashMap<usize, usize>,
+) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    for skin in document.skins() {
+        for joint in skin.joints() {
+            if let Some(&dense) = gltf_to_local.get(&joint.index()) {
+                set.insert(dense);
+            }
+        }
+    }
+    set
 }
 
 #[cfg(test)]
@@ -246,6 +408,7 @@ mod tests {
         assert_eq!(stats.triangle_count, 1);
         assert_eq!(stats.material_count, 1);
         assert_eq!(stats.animation_count, 0);
+        assert!(stats.animations.is_empty());
         assert_eq!(stats.base_colors, vec![[1.0, 0.0, 0.0, 1.0]]);
         assert!(stats.bounding_sphere.is_some());
     }
@@ -278,5 +441,48 @@ mod tests {
     #[test]
     fn missing_file_errors() {
         assert!(load_gltf(asset("does-not-exist.gltf")).is_err());
+    }
+
+    // --- Animation loading ------------------------------------------------------------------------
+
+    #[test]
+    fn animated_glb_reports_animation_name_and_duration() {
+        let (_scene, stats) = load_gltf_with_stats(asset("animated_triangle.glb")).unwrap();
+        assert_eq!(stats.animation_count, 1);
+        assert_eq!(stats.animations.len(), 1);
+        assert_eq!(stats.animations[0].name, "slide");
+        assert!((stats.animations[0].duration - 1.0).abs() < EPS);
+        assert!(!stats.animations[0].skinned, "no skin in this fixture");
+    }
+
+    #[test]
+    fn animated_scene_moves_vertices_between_t0_and_tmid() {
+        let animated = load_gltf_animated(asset("animated_triangle.glb")).unwrap();
+        assert!(animated.has_animations());
+        assert_eq!(animated.instances.len(), 1, "one triangle primitive");
+
+        let mut animator = crate::anim::SceneAnimator::new(animated);
+        let mut scene = Scene::default();
+
+        animator.pose_into(Some(0), 0.0, &mut scene);
+        let at0 = scene.meshes[0].vertices[0].position;
+        animator.pose_into(Some(0), 0.5, &mut scene);
+        let at_mid = scene.meshes[0].vertices[0].position;
+
+        // The channel slides the node +10 in x over 1s, so the midpoint is +5.
+        assert!(
+            (at_mid - at0 - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-4,
+            "vertices must move between t=0 and t=mid"
+        );
+    }
+
+    #[test]
+    fn baked_static_pose_matches_default_load() {
+        // The static baked scene is the animated scene posed at its defaults.
+        let animated = load_gltf_animated(asset("triangle.gltf")).unwrap();
+        let baked = animated.bake_static();
+        let direct = load_gltf(asset("triangle.gltf")).unwrap();
+        assert_eq!(baked.triangle_count(), direct.triangle_count());
+        assert_eq!(baked.vertex_count(), direct.vertex_count());
     }
 }
